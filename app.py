@@ -78,8 +78,8 @@ CORS(
             "origins": [
                 "https://voice-transcribe-11.web.app",
                 "https://voice-transcribe-11.firebaseapp.com",
-                "http://localhost:5000",
-                "http://127.0.0.1:5000",
+                r"^http://localhost:\d+$",
+                r"^http://127\.0\.0\.1:\d+$",
             ],
             "methods": [
                 "GET",
@@ -97,6 +97,11 @@ CORS(
         }
     }
 )
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        return "", 204
 
 
 @app.before_request
