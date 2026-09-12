@@ -651,7 +651,6 @@ def reset_password():
 
     if not user:
         print(
-            "RESET DEBUG: token hash was not found or token was already used."
         )
 
         return jsonify({
