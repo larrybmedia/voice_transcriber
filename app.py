@@ -605,7 +605,7 @@ def reset_password():
         }), 400
 
     token = data.get("token")
-    new_password = data.get("new_password")
+    new_password = data.get("password")
 
     # --------------------------------------------------------
     # VALIDATE TOKEN
