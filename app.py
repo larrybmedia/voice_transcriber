@@ -431,7 +431,7 @@ def logout():
 
 
 # ============================================================
-# AUTHENTICATION - RESET PASSWORD
+# AUTHENTICATION - FORGOT PASSWORD
 # ============================================================
 
 @app.route(
@@ -584,6 +584,131 @@ def forgot_password():
         }), 500
 
     return jsonify(generic_response), 200
+
+
+# ============================================================
+# AUTHENTICATION - RESET PASSWORD
+# ============================================================
+
+@app.route(
+    "/api/auth/reset-password",
+    methods=["POST"]
+)
+def reset_password():
+
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({
+            "success": False,
+            "error": "Request body must be JSON."
+        }), 400
+
+    token = data.get("token")
+    new_password = data.get("new_password")
+
+    # --------------------------------------------------------
+    # VALIDATE TOKEN
+    # --------------------------------------------------------
+
+    if not token:
+        return jsonify({
+            "success": False,
+            "error": "Reset token is required."
+        }), 400
+
+    # --------------------------------------------------------
+    # VALIDATE NEW PASSWORD
+    # --------------------------------------------------------
+
+    if not new_password:
+        return jsonify({
+            "success": False,
+            "error": "New password is required."
+        }), 400
+
+    if len(new_password) < 8:
+        return jsonify({
+            "success": False,
+            "error": "Password must be at least 8 characters."
+        }), 400
+
+    # --------------------------------------------------------
+    # HASH THE TOKEN
+    # --------------------------------------------------------
+
+    token_hash = hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()
+
+    # --------------------------------------------------------
+    # FIND USER
+    # --------------------------------------------------------
+
+    user = User.query.filter_by(
+        password_reset_token_hash=token_hash
+    ).first()
+
+    if not user:
+        return jsonify({
+            "success": False,
+            "error": "Invalid or expired reset token."
+        }), 400
+
+    # --------------------------------------------------------
+    # CHECK WHETHER TOKEN HAS ALREADY BEEN USED
+    # --------------------------------------------------------
+
+    if user.password_reset_used:
+        return jsonify({
+            "success": False,
+            "error": "This reset link has already been used."
+        }), 400
+
+    # --------------------------------------------------------
+    # CHECK TOKEN EXPIRATION
+    # --------------------------------------------------------
+
+    if not user.password_reset_expires_at:
+        return jsonify({
+            "success": False,
+            "error": "Invalid or expired reset token."
+        }), 400
+
+    expires_at = user.password_reset_expires_at
+
+    # Handle databases that return a naive datetime.
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(
+            tzinfo=timezone.utc
+        )
+
+    if datetime.now(timezone.utc) > expires_at:
+        return jsonify({
+            "success": False,
+            "error": "This reset link has expired. Please request a new one."
+        }), 400
+
+    # --------------------------------------------------------
+    # UPDATE PASSWORD
+    # --------------------------------------------------------
+
+    user.set_password(new_password)
+
+    # --------------------------------------------------------
+    # INVALIDATE RESET TOKEN
+    # --------------------------------------------------------
+
+    user.password_reset_used = True
+    user.password_reset_token_hash = None
+    user.password_reset_expires_at = None
+
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "Password reset successfully. You can now log in."
+    }), 200
 
 # ----------------------------------------------------
 # TRANSCRIPTION STATUS
