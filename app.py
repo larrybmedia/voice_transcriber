@@ -650,6 +650,10 @@ def reset_password():
     ).first()
 
     if not user:
+        print(
+            "RESET DEBUG: token hash was not found or token was already used."
+        )
+
         return jsonify({
             "success": False,
             "error": "Invalid or expired reset token."
