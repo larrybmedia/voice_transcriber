@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from groq import Groq
 from flask_migrate import Migrate
 from models import db, User
+import resend
 
 import jwt
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,13 @@ from datetime import datetime, timedelta, timezone
 # ============================================================
 
 load_dotenv()
+
+resend.api_key = os.getenv("RESEND_API_KEY")
+
+RESEND_FROM_EMAIL = os.getenv(
+    "RESEND_FROM_EMAIL",
+    "noreply@bestvisionenterprises.ng"
+)
 
 
 # ============================================================
@@ -423,7 +431,7 @@ def logout():
 
 
 # ============================================================
-# AUTHENTICATION - FORGOT PASSWORD
+# AUTHENTICATION - RESET PASSWORD
 # ============================================================
 
 @app.route(
@@ -456,7 +464,7 @@ def forgot_password():
         "success": True,
         "message": (
             "If an account with that email exists, "
-            "a password reset request has been created."
+            "a password reset link has been sent."
         )
     }
 
@@ -487,105 +495,95 @@ def forgot_password():
 
     db.session.commit()
 
-    # Development-only response.
-    # Do NOT expose this token in production.
-    return jsonify({
-        **generic_response,
-        "development_reset_token": reset_token
-    }), 200
+    # Frontend page that will handle the password reset.
+    reset_link = (
+        "https://voice-transcribe-11.web.app/#/reset-password"
+        f"?token={reset_token}"
+    )
 
+    try:
+        resend.Emails.send({
+            "from": RESEND_FROM_EMAIL,
+            "to": [email],
+            "subject": "Reset your NabTranscriber password",
+            "html": f"""
+                <div style="
+                    font-family: Arial, sans-serif;
+                    max-width: 600px;
+                    margin: 0 auto;
+                    padding: 30px;
+                    color: #222;
+                ">
+                    <h2 style="margin-bottom: 10px;">
+                        Reset Your Password
+                    </h2>
 
-# ============================================================
-# AUTHENTICATION - RESET PASSWORD
-# ============================================================
+                    <p>
+                        We received a request to reset your
+                        NabTranscriber password.
+                    </p>
 
-@app.route(
-    "/api/auth/reset-password",
-    methods=["POST"]
-)
-def reset_password():
+                    <p>
+                        Click the button below to create a new password.
+                    </p>
 
-    data = request.get_json(silent=True)
+                    <p style="margin: 30px 0;">
+                        <a href="{reset_link}"
+                           style="
+                               background: #1B5E20;
+                               color: white;
+                               padding: 14px 24px;
+                               text-decoration: none;
+                               border-radius: 6px;
+                               display: inline-block;
+                               font-weight: bold;
+                           ">
+                            RESET PASSWORD
+                        </a>
+                    </p>
 
-    if not data:
-        return jsonify({
-            "success": False,
-            "error": "Request body must be JSON."
-        }), 400
+                    <p>
+                        This link will expire in
+                        <strong>30 minutes</strong>.
+                    </p>
 
-    token = data.get("token")
-    new_password = data.get("password")
+                    <p>
+                        If you did not request a password reset,
+                        you can safely ignore this email.
+                    </p>
 
-    if not token:
-        return jsonify({
-            "success": False,
-            "error": "Reset token is required."
-        }), 400
+                    <hr style="
+                        margin: 30px 0;
+                        border: none;
+                        border-top: 1px solid #ddd;
+                    ">
 
-    if not new_password:
-        return jsonify({
-            "success": False,
-            "error": "New password is required."
-        }), 400
+                    <p style="
+                        font-size: 12px;
+                        color: #777;
+                    ">
+                        NabTranscriber<br>
+                        Automated security notification
+                    </p>
+                </div>
+            """
+        })
 
-    if len(new_password) < 8:
-        return jsonify({
-            "success": False,
-            "error": "Password must be at least 8 characters."
-        }), 400
-
-    # Hash the supplied reset token.
-    token_hash = hashlib.sha256(
-        token.encode("utf-8")
-    ).hexdigest()
-
-    # Find the user using the hashed token.
-    user = User.query.filter_by(
-        password_reset_token_hash=token_hash,
-        password_reset_used=False
-    ).first()
-
-    if not user:
-        return jsonify({
-            "success": False,
-            "error": "Invalid or expired reset token."
-        }), 400
-
-    # Check token expiration.
-    now = datetime.now(timezone.utc)
-
-    expires_at = user.password_reset_expires_at
-
-    # SQLite may return timezone-naive datetimes.
-    # Treat them as UTC before comparing.
-    if expires_at and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(
-            tzinfo=timezone.utc
+    except Exception as email_error:
+        print(
+            "Password reset email failed:",
+            email_error
         )
 
-    if (
-        not expires_at
-        or expires_at <= now
-    ):
         return jsonify({
             "success": False,
-            "error": "Invalid or expired reset token."
-        }), 400
+            "error": (
+                "We could not send the password reset email. "
+                "Please try again later."
+            )
+        }), 500
 
-    # Set the new password.
-    user.set_password(new_password)
-
-    # Invalidate the reset token immediately.
-    user.password_reset_token_hash = None
-    user.password_reset_expires_at = None
-    user.password_reset_used = True
-
-    db.session.commit()
-
-    return jsonify({
-        "success": True,
-        "message": "Password reset successfully."
-    }), 200
+    return jsonify(generic_response), 200
 
 # ----------------------------------------------------
 # TRANSCRIPTION STATUS
