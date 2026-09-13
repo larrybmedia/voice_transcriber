@@ -21,7 +21,6 @@ from models import (
 )
 
 from subscription_service import (
-    authorize_action,
     check_action,
     get_plan_config,
     get_active_subscription,
@@ -1551,7 +1550,7 @@ def transcribe():
         # recordings are unlimited and continue to be processed in chunks.
         if plan == "free":
             duration_seconds = get_audio_duration_seconds(temp_path)
-            if duration_seconds > 601:
+            if duration_seconds > 600:
                 os.remove(temp_path)
                 transcription_jobs.pop(job_id, None)
                 return jsonify({
@@ -1643,6 +1642,42 @@ def transcribe():
             "job_id": job_id,
             "error": str(e)
         }), 500
+
+
+# --------------------------------------------------------
+# TRANSCRIPTION STATUS
+# --------------------------------------------------------
+
+@app.route(
+    "/api/transcription-status/<job_id>",
+    methods=["GET"]
+)
+def transcription_status(job_id):
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    job = transcription_jobs.get(job_id)
+
+    if not job:
+        return jsonify({
+            "success": False,
+            "error": "Transcription job not found.",
+            "code": "job_not_found",
+        }), 404
+
+    return jsonify({
+        "success": True,
+        "job_id": job_id,
+        "status": job.get("status"),
+        "completed_chunks": job.get("completed_chunks", 0),
+        "total_chunks": job.get("total_chunks", 0),
+        "progress": job.get("progress", 0),
+        "text": job.get("text"),
+        "error": job.get("error"),
+    }), 200
 
 
 # ============================================================

@@ -1,10 +1,7 @@
 from datetime import datetime, timezone
 
 from models import (
-    db,
     Subscription,
-    UserCredit,
-    CreditTransaction,
 )
 
 
@@ -23,6 +20,7 @@ PLAN_CONFIG = {
         "max_recording_minutes": 10,
         "daily_transcriptions": 1,
     },
+
     "gold": {
         "monthly": 5000,
         "6_months": 28000,
@@ -30,7 +28,9 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": False,
         "upload": False,
+        "daily_transcriptions": None,
     },
+
     "enterprise": {
         "monthly": 8000,
         "6_months": 46000,
@@ -38,9 +38,9 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": True,
         "upload": True,
+        "daily_transcriptions": None,
     },
 }
-
 
 
 # ============================================================
@@ -49,12 +49,22 @@ PLAN_CONFIG = {
 
 def get_plan_config(plan):
     """Return normalized configuration for a subscription plan."""
-    return PLAN_CONFIG.get((plan or "").lower(), {})
+
+    return PLAN_CONFIG.get(
+        (plan or "").lower(),
+        {},
+    )
 
 
 def is_free_plan(user_id):
+    """Return True if the user has an active Free subscription."""
+
     subscription = get_active_subscription(user_id)
-    return bool(subscription and subscription.plan.lower() == "free")
+
+    return bool(
+        subscription
+        and subscription.plan.lower() == "free"
+    )
 
 
 # ============================================================
@@ -79,18 +89,6 @@ def get_active_subscription(user_id):
             return subscription
 
     return None
-
-
-# ============================================================
-# GET USER CREDIT ACCOUNT
-# ============================================================
-
-def get_credit_account(user_id):
-    """Return the user's credit account."""
-
-    return UserCredit.query.filter_by(
-        user_id=user_id
-    ).first()
 
 
 # ============================================================
@@ -123,149 +121,106 @@ def has_plan_permission(user_id, action):
 
 
 # ============================================================
-# CHECK CREDIT
+# CHECK ACTION
 # ============================================================
 
-def has_credit(user_id):
-    """Return True if the user has at least one available credit."""
-
-    credit_account = get_credit_account(user_id)
-
-    if not credit_account:
-        return False
-
-    return credit_account.credits > 0
-
-
-# ============================================================
-# USE ONE CREDIT
-# ============================================================
-
-def consume_credit(
-    user_id,
-    action,
-    recording_id=None,
-):
+def check_action(user_id, action):
     """
-    Consume one credit and create a credit transaction.
+    Check whether the user's active subscription allows
+    the requested action.
+
+    Credits are no longer used.
+
+    Supported actions:
+        record
+        meeting_record
+        upload
+    """
+
+    if not has_plan_permission(
+        user_id=user_id,
+        action=action,
+    ):
+        return False, (
+            "Your current subscription plan does not allow "
+            f"the '{action}' feature."
+        )
+
+    return True, "Action authorized."
+
+
+# ============================================================
+# TRANSCRIPTION LIMIT
+# ============================================================
+
+def get_daily_transcription_limit(user_id):
+    """
+    Return the user's daily transcription limit.
+
+    Free:
+        1 transcription per day
+
+    Gold:
+        Unlimited
+
+    Enterprise:
+        Unlimited
+    """
+
+    subscription = get_active_subscription(user_id)
+
+    if not subscription:
+        return 0
+
+    config = get_plan_config(
+        subscription.plan
+    )
+
+    return config.get(
+        "daily_transcriptions"
+    )
+
+
+# ============================================================
+# FREE PLAN CHECK
+# ============================================================
+
+def check_free_transcription_limit(user_id, transcriptions_today):
+    """
+    Check whether a Free user can perform another
+    transcription today.
+
+    Gold and Enterprise users are unlimited.
 
     Returns:
         (True, message)
         (False, message)
     """
 
-    credit_account = get_credit_account(user_id)
+    subscription = get_active_subscription(user_id)
 
-    if not credit_account:
-        return False, "Credit account not found."
-
-    if credit_account.credits <= 0:
-        return False, "You have no credits remaining."
-
-    success = credit_account.use_credit()
-
-    if not success:
-        return False, "You have no credits remaining."
-
-    transaction = CreditTransaction(
-        user_id=user_id,
-        action=action,
-        credits_used=1,
-        recording_id=recording_id,
-    )
-
-    db.session.add(transaction)
-    db.session.commit()
-
-    return True, "Credit used successfully."
-
-
-# ============================================================
-# CHECK ACTION + CREDIT
-# ============================================================
-
-def check_action(user_id, action):
-    """
-    Check whether the user is allowed to perform an action
-    without consuming a credit.
-    """
-
-    if not has_plan_permission(user_id, action):
+    if not subscription:
         return False, (
-            "Your current subscription plan does not allow "
-            f"the '{action}' feature."
+            "No active subscription was found."
         )
 
-    if not has_credit(user_id):
+    plan = subscription.plan.lower()
+
+    if plan != "free":
+        return True, "Unlimited transcription available."
+
+    daily_limit = get_daily_transcription_limit(
+        user_id
+    )
+
+    if (
+        daily_limit is not None
+        and transcriptions_today >= daily_limit
+    ):
         return False, (
-            "You have no credits remaining. "
-            "Please upgrade or purchase additional credits."
+            "Your Free plan allows 1 transcription "
+            "per day. Please try again tomorrow or "
+            "upgrade your plan."
         )
 
-    return True, "Action authorized."
-
-
-def authorize_action(user_id, action, recording_id=None):
-    """
-    Check permission and consume one credit.
-    """
-
-    success, message = check_action(
-        user_id=user_id,
-        action=action,
-    )
-
-    if not success:
-        return False, message
-
-    return consume_credit(
-        user_id=user_id,
-        action=action,
-        recording_id=recording_id,
-    )
-
-
-# ============================================================
-# CREATE FREE ACCOUNT
-# ============================================================
-
-def create_free_account_records(user_id):
-    """
-    Create the default Free subscription and 5 credits
-    for a newly registered user.
-
-    This function is mainly useful for future migrations
-    and existing-user backfills.
-    """
-
-    existing_subscription = Subscription.query.filter_by(
-        user_id=user_id
-    ).first()
-
-    if not existing_subscription:
-        subscription = Subscription(
-            user_id=user_id,
-            plan="free",
-            billing_cycle="free",
-            amount=0,
-            start_date=datetime.now(timezone.utc),
-            end_date=None,
-            status="active",
-        )
-
-        db.session.add(subscription)
-
-    existing_credit = UserCredit.query.filter_by(
-        user_id=user_id
-    ).first()
-
-    if not existing_credit:
-        credit_account = UserCredit(
-            user_id=user_id,
-            credits=5,
-            used_credits=0,
-        )
-
-        db.session.add(credit_account)
-
-    db.session.commit()
+    return True, "Free transcription available."
