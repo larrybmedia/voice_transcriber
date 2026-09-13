@@ -23,9 +23,9 @@ from models import (
 from subscription_service import (
     authorize_action,
     check_action,
-    get_active_subscription,
-    is_free_plan,
     get_plan_config,
+    get_active_subscription,
+    has_plan_permission,
 )
 
 import resend
@@ -893,79 +893,65 @@ def reset_password():
 )
 def check_subscription_action():
 
-    # --------------------------------------------------------
-    # AUTHENTICATE USER
-    # --------------------------------------------------------
-
     user, auth_error = get_authenticated_user()
-
     if auth_error:
         return auth_error
 
-    # --------------------------------------------------------
-    # READ REQUEST
-    # --------------------------------------------------------
-
     data = request.get_json(silent=True) or {}
-
     action = data.get("action")
+    action_aliases = {"upload_audio": "upload", "transcription": "transcribe"}
+    action = action_aliases.get(action, action)
 
-    if not action:
-        return jsonify({
-            "success": False,
-            "error": "Action is required."
-        }), 400
-
-    # --------------------------------------------------------
-    # ALLOWED ACTIONS
-    # --------------------------------------------------------
-
-    allowed_actions = {
-        "record",
-        "meeting_record",
-        "upload",
-    }
-
+    allowed_actions = {"record", "meeting_record", "upload", "transcribe"}
     if action not in allowed_actions:
+        return jsonify({"success": False, "error": "Invalid action."}), 400
+
+    subscription = get_active_subscription(user.id)
+    if not subscription:
+        return jsonify({"success": False, "error": "No active subscription found."}), 403
+
+    plan = subscription.plan.lower()
+    config = get_plan_config(plan)
+
+    # Transcription is available to all plans that can record; Free has a daily limit.
+    if action == "transcribe":
+        if not config.get("record", False):
+            return jsonify({"success": False, "error": "Your current subscription plan does not allow transcription."}), 403
+
+        remaining_daily = None
+        if plan == "free":
+            remaining_daily = free_transcription_remaining_today(user.id)
+            if remaining_daily <= 0:
+                return jsonify({
+                    "success": False,
+                    "error": "Your Free plan allows 1 transcription per day. Please try again tomorrow or upgrade your plan.",
+                    "code": "daily_transcription_limit_reached",
+                    "remaining_daily_transcriptions": 0,
+                }), 403
+
         return jsonify({
-            "success": False,
-            "error": "Invalid action."
-        }), 400
+            "success": True,
+            "message": "Action authorized.",
+            "action": action,
+            "plan": plan,
+            "remaining_daily_transcriptions": remaining_daily,
+            "max_recording_minutes": config.get("max_recording_minutes"),
+        }), 200
 
-    # --------------------------------------------------------
-    # CHECK SUBSCRIPTION + CREDIT
-    # --------------------------------------------------------
-
-    success, message = check_action(
-        user_id=user.id,
-        action=action,
-    )
-
-    if not success:
-        return jsonify({
-            "success": False,
-            "error": message,
-        }), 403
-
-    # --------------------------------------------------------
-    # GET CURRENT CREDIT BALANCE
-    # --------------------------------------------------------
-
-    credit_account = UserCredit.query.filter_by(
-        user_id=user.id
-    ).first()
-
-    remaining_credits = (
-        credit_account.credits
-        if credit_account
-        else 0
-    )
+    if not config.get(action, False):
+        messages = {
+            "record": "Your current subscription plan does not allow voice recording.",
+            "meeting_record": "Meeting recording is available on the Enterprise plan only.",
+            "upload": "Audio upload is available on the Enterprise plan only.",
+        }
+        return jsonify({"success": False, "error": messages.get(action, "Feature not available on your plan.")}), 403
 
     return jsonify({
         "success": True,
-        "message": message,
+        "message": "Action authorized.",
         "action": action,
-        "remaining_credits": remaining_credits,
+        "plan": plan,
+        "max_recording_minutes": config.get("max_recording_minutes"),
     }), 200
 
 
@@ -979,174 +965,39 @@ def check_subscription_action():
 )
 def authorize_subscription_action():
 
-    # --------------------------------------------------------
-    # AUTHENTICATE USER
-    # --------------------------------------------------------
-
     user, auth_error = get_authenticated_user()
-
     if auth_error:
         return auth_error
 
-    # --------------------------------------------------------
-    # READ REQUEST
-    # --------------------------------------------------------
-
     data = request.get_json(silent=True) or {}
-
     action = data.get("action")
-    recording_id = data.get("recording_id")
+    action_aliases = {"upload_audio": "upload", "transcription": "transcribe"}
+    action = action_aliases.get(action, action)
 
-    if not action:
-        return jsonify({
-            "success": False,
-            "error": "Action is required."
-        }), 400
-
-    # --------------------------------------------------------
-    # ALLOWED ACTIONS
-    # --------------------------------------------------------
-
-    allowed_actions = {
-        "record",
-        "meeting_record",
-        "upload",
-    }
-
+    allowed_actions = {"record", "meeting_record", "upload", "transcribe"}
     if action not in allowed_actions:
-        return jsonify({
-            "success": False,
-            "error": "Invalid action."
-        }), 400
+        return jsonify({"success": False, "error": "Invalid action."}), 400
 
-    # --------------------------------------------------------
-    # CHECK SUBSCRIPTION + CREDIT
-    # --------------------------------------------------------
+    # Subscription permissions, not the legacy credit balance, control plan access.
+    subscription = get_active_subscription(user.id)
+    if not subscription:
+        return jsonify({"success": False, "error": "No active subscription found."}), 403
 
-    success, message = authorize_action(
-        user_id=user.id,
-        action=action,
-        recording_id=recording_id,
-    )
+    plan = subscription.plan.lower()
+    config = get_plan_config(plan)
+    if not config.get("record", False) and action == "transcribe":
+        return jsonify({"success": False, "error": "Your current subscription plan does not allow transcription."}), 403
 
-    if not success:
-        return jsonify({
-            "success": False,
-            "error": message,
-        }), 403
-
-    # --------------------------------------------------------
-    # GET UPDATED CREDIT BALANCE
-    # --------------------------------------------------------
-
-    credit_account = UserCredit.query.filter_by(
-        user_id=user.id
-    ).first()
-
-    remaining_credits = (
-        credit_account.credits
-        if credit_account
-        else 0
-    )
+    if action != "transcribe" and not config.get(action, False):
+        return jsonify({"success": False, "error": f"Your current subscription plan does not allow the '{action}' feature."}), 403
 
     return jsonify({
         "success": True,
-        "message": message,
+        "message": "Action authorized.",
         "action": action,
-        "remaining_credits": remaining_credits,
+        "plan": plan,
+        "max_recording_minutes": config.get("max_recording_minutes"),
     }), 200
-
-
-# ----------------------------------------------------
-# TRANSCRIPTION STATUS
-# ----------------------------------------------------
-
-@app.route(
-    "/api/transcription-status/<job_id>",
-    methods=["GET"]
-)
-def transcription_status(job_id):
-
-    job = transcription_jobs.get(job_id)
-
-    if not job:
-        return jsonify({
-            "success": False,
-            "error": "Transcription job not found."
-        }), 404
-
-    return jsonify({
-        "success": True,
-        "job_id": job_id,
-        "status": job.get("status"),
-        "completed_chunks": job.get(
-            "completed_chunks",
-            0
-        ),
-        "total_chunks": job.get(
-            "total_chunks",
-            0
-        ),
-        "progress": job.get(
-            "progress",
-            0
-        ),
-        "text": job.get("text"),
-        "error": job.get("error")
-    }), 200
-
-
-# ============================================================
-# AUDIO DURATION HELPER
-# ============================================================
-
-def get_audio_duration_seconds(audio_path):
-    """Return audio duration in seconds using ffprobe."""
-
-    command = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        audio_path,
-    ]
-
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=30,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Unable to determine the recording duration. "
-            "Please try recording again."
-        )
-
-    try:
-        return float(result.stdout.strip())
-    except (TypeError, ValueError):
-        raise RuntimeError(
-            "Unable to determine the recording duration. "
-            "Please try recording again."
-        )
-
-
-def free_transcription_used_today(user_id):
-    """Check whether a Free user has completed a transcription today."""
-
-    now = datetime.now(timezone.utc)
-    start_of_day = now.replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-
-    return CreditTransaction.query.filter(
-        CreditTransaction.user_id == user_id,
-        CreditTransaction.action == "transcription",
-        CreditTransaction.created_at >= start_of_day,
-    ).first() is not None
 
 
 # ============================================================
@@ -1157,7 +1008,7 @@ def process_transcription_job(
     job_id,
     temp_path,
     file_extension,
-    user_id
+    user_id=None,
 ):
 
     chunk_directory = None
@@ -1446,18 +1297,18 @@ def process_transcription_job(
             f"{len(final_text)} characters"
         )
 
-        # Record a successful transcription for Free-plan daily limits.
-        # Failed jobs do not consume the daily transcription allowance.
-        with app.app_context():
-            db.session.add(
-                CreditTransaction(
-                    user_id=user_id,
-                    action="transcription",
-                    credits_used=0,
-                    recording_id=job_id,
-                )
-            )
-            db.session.commit()
+        # Record one successful Free-plan transcription for the daily limit.
+        if user_id is not None:
+            with app.app_context():
+                subscription = get_active_subscription(user_id)
+                if subscription and subscription.plan.lower() == "free":
+                    db.session.add(CreditTransaction(
+                        user_id=user_id,
+                        action="transcription",
+                        credits_used=0,
+                        recording_id=job_id,
+                    ))
+                    db.session.commit()
 
     except Exception as e:
 
@@ -1528,6 +1379,35 @@ def process_transcription_job(
 
 
 # ============================================================
+# SUBSCRIPTION TRANSCRIPTION LIMIT HELPERS
+# ============================================================
+
+def free_transcription_remaining_today(user_id):
+    """Return remaining Free-plan transcriptions for the current UTC day."""
+    from datetime import datetime, timezone
+
+    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    used = CreditTransaction.query.filter(
+        CreditTransaction.user_id == user_id,
+        CreditTransaction.action == "transcription",
+        CreditTransaction.created_at >= start_of_day,
+    ).count()
+    return max(0, 1 - used)
+
+
+def get_audio_duration_seconds(file_path):
+    """Return media duration using ffprobe."""
+    command = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        file_path,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=True)
+    return float(result.stdout.strip())
+
+
+# ============================================================
 # TRANSCRIPTION
 # ============================================================
 
@@ -1546,17 +1426,37 @@ def transcribe():
     if auth_error:
         return auth_error
 
-    # --------------------------------------------------------
-    # FREE PLAN: ONE SUCCESSFUL TRANSCRIPTION PER DAY
-    # --------------------------------------------------------
+    subscription = get_active_subscription(user.id)
+    if not subscription:
+        return jsonify({"success": False, "error": "No active subscription found."}), 403
 
-    if is_free_plan(user.id) and free_transcription_used_today(user.id):
+    plan = subscription.plan.lower()
+    config = get_plan_config(plan)
+    source = (request.form.get("source") or "recording").strip().lower()
+    if source in {"upload_audio", "file", "uploaded"}:
+        source = "upload"
+
+    if source == "upload" and not config.get("upload", False):
         return jsonify({
             "success": False,
-            "error": (
-                "Your Free plan allows 1 transcription per day. "
-                "Please try again tomorrow or upgrade your plan."
-            ),
+            "error": "Audio upload and file transcription are available on the Enterprise plan only.",
+            "code": "upload_not_allowed",
+        }), 403
+
+    if source == "meeting" and not config.get("meeting_record", False):
+        return jsonify({
+            "success": False,
+            "error": "Meeting recording is available on the Enterprise plan only.",
+            "code": "meeting_record_not_allowed",
+        }), 403
+
+    if not config.get("record", False):
+        return jsonify({"success": False, "error": "Your current subscription plan does not allow transcription."}), 403
+
+    if plan == "free" and free_transcription_remaining_today(user.id) <= 0:
+        return jsonify({
+            "success": False,
+            "error": "Your Free plan allows 1 transcription per day. Please try again tomorrow or upgrade your plan.",
             "code": "daily_transcription_limit_reached",
         }), 403
 
@@ -1647,36 +1547,18 @@ def transcribe():
             f"{file_size} bytes"
         )
 
-        # ----------------------------------------------------
-        # FREE PLAN: MAXIMUM 10-MINUTE RECORDING
-        # ----------------------------------------------------
-
-        if is_free_plan(user.id):
-            plan_config = get_plan_config(user.id) or {}
-            max_minutes = plan_config.get("max_recording_minutes")
-
-            if max_minutes:
-                duration_seconds = get_audio_duration_seconds(temp_path)
-                max_seconds = max_minutes * 60
-
-                print(
-                    f"[{job_id}] Audio duration: "
-                    f"{duration_seconds:.2f} seconds"
-                )
-
-                if duration_seconds > max_seconds + 1:
-                    os.remove(temp_path)
-                    temp_path = None
-                    transcription_jobs[job_id]["status"] = "failed"
-                    transcription_jobs[job_id]["error"] = (
-                        f"Free plan recordings are limited to {max_minutes} minutes. "
-                        "Please record a shorter audio or upgrade your plan."
-                    )
-                    return jsonify({
-                        "success": False,
-                        "error": transcription_jobs[job_id]["error"],
-                        "code": "recording_duration_limit_reached",
-                    }), 403
+        # Free recordings are limited to 10 minutes. Gold and Enterprise
+        # recordings are unlimited and continue to be processed in chunks.
+        if plan == "free":
+            duration_seconds = get_audio_duration_seconds(temp_path)
+            if duration_seconds > 601:
+                os.remove(temp_path)
+                transcription_jobs.pop(job_id, None)
+                return jsonify({
+                    "success": False,
+                    "error": "Free plan recordings are limited to 10 minutes.",
+                    "code": "recording_duration_limit_reached",
+                }), 403
 
         # ----------------------------------------------------
         # START BACKGROUND WORKER
@@ -1688,7 +1570,7 @@ def transcribe():
                 job_id,
                 temp_path,
                 file_extension,
-                user.id
+                user.id,
             ),
             daemon=True
         )

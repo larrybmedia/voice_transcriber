@@ -18,9 +18,8 @@ PLAN_CONFIG = {
         "6_months": 0,
         "yearly": 0,
         "record": True,
-        "meeting_record": True,
-        "upload": True,
-        # Free-plan limits
+        "meeting_record": False,
+        "upload": False,
         "max_recording_minutes": 10,
         "daily_transcriptions": 1,
     },
@@ -39,31 +38,21 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": True,
         "upload": True,
-        # Free-plan limits
-        "max_recording_minutes": 10,
-        "daily_transcriptions": 1,
     },
 }
 
 
+
 # ============================================================
-# PLAN LIMITS
+# PLAN HELPERS
 # ============================================================
 
-def get_plan_config(user_id):
-    """Return the configuration for the user's active plan."""
-
-    subscription = get_active_subscription(user_id)
-
-    if not subscription:
-        return None
-
-    return PLAN_CONFIG.get(subscription.plan.lower())
+def get_plan_config(plan):
+    """Return normalized configuration for a subscription plan."""
+    return PLAN_CONFIG.get((plan or "").lower(), {})
 
 
 def is_free_plan(user_id):
-    """Return True when the user's active plan is Free."""
-
     subscription = get_active_subscription(user_id)
     return bool(subscription and subscription.plan.lower() == "free")
 
