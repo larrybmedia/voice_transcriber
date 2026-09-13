@@ -20,6 +20,9 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": True,
         "upload": True,
+        # Free-plan limits
+        "max_recording_minutes": 10,
+        "daily_transcriptions": 1,
     },
     "gold": {
         "monthly": 5000,
@@ -36,8 +39,33 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": True,
         "upload": True,
+        # Free-plan limits
+        "max_recording_minutes": 10,
+        "daily_transcriptions": 1,
     },
 }
+
+
+# ============================================================
+# PLAN LIMITS
+# ============================================================
+
+def get_plan_config(user_id):
+    """Return the configuration for the user's active plan."""
+
+    subscription = get_active_subscription(user_id)
+
+    if not subscription:
+        return None
+
+    return PLAN_CONFIG.get(subscription.plan.lower())
+
+
+def is_free_plan(user_id):
+    """Return True when the user's active plan is Free."""
+
+    subscription = get_active_subscription(user_id)
+    return bool(subscription and subscription.plan.lower() == "free")
 
 
 # ============================================================

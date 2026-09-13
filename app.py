@@ -23,6 +23,9 @@ from models import (
 from subscription_service import (
     authorize_action,
     check_action,
+    get_active_subscription,
+    is_free_plan,
+    get_plan_config,
 )
 
 import resend
@@ -1094,13 +1097,67 @@ def transcription_status(job_id):
 
 
 # ============================================================
+# AUDIO DURATION HELPER
+# ============================================================
+
+def get_audio_duration_seconds(audio_path):
+    """Return audio duration in seconds using ffprobe."""
+
+    command = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        audio_path,
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Unable to determine the recording duration. "
+            "Please try recording again."
+        )
+
+    try:
+        return float(result.stdout.strip())
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "Unable to determine the recording duration. "
+            "Please try recording again."
+        )
+
+
+def free_transcription_used_today(user_id):
+    """Check whether a Free user has completed a transcription today."""
+
+    now = datetime.now(timezone.utc)
+    start_of_day = now.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    return CreditTransaction.query.filter(
+        CreditTransaction.user_id == user_id,
+        CreditTransaction.action == "transcription",
+        CreditTransaction.created_at >= start_of_day,
+    ).first() is not None
+
+
+# ============================================================
 # BACKGROUND TRANSCRIPTION WORKER
 # ============================================================
 
 def process_transcription_job(
     job_id,
     temp_path,
-    file_extension
+    file_extension,
+    user_id
 ):
 
     chunk_directory = None
@@ -1389,6 +1446,19 @@ def process_transcription_job(
             f"{len(final_text)} characters"
         )
 
+        # Record a successful transcription for Free-plan daily limits.
+        # Failed jobs do not consume the daily transcription allowance.
+        with app.app_context():
+            db.session.add(
+                CreditTransaction(
+                    user_id=user_id,
+                    action="transcription",
+                    credits_used=0,
+                    recording_id=job_id,
+                )
+            )
+            db.session.commit()
+
     except Exception as e:
 
         print(
@@ -1475,6 +1545,20 @@ def transcribe():
 
     if auth_error:
         return auth_error
+
+    # --------------------------------------------------------
+    # FREE PLAN: ONE SUCCESSFUL TRANSCRIPTION PER DAY
+    # --------------------------------------------------------
+
+    if is_free_plan(user.id) and free_transcription_used_today(user.id):
+        return jsonify({
+            "success": False,
+            "error": (
+                "Your Free plan allows 1 transcription per day. "
+                "Please try again tomorrow or upgrade your plan."
+            ),
+            "code": "daily_transcription_limit_reached",
+        }), 403
 
     # --------------------------------------------------------
     # CHECK THAT AN AUDIO FILE WAS UPLOADED
@@ -1564,6 +1648,37 @@ def transcribe():
         )
 
         # ----------------------------------------------------
+        # FREE PLAN: MAXIMUM 10-MINUTE RECORDING
+        # ----------------------------------------------------
+
+        if is_free_plan(user.id):
+            plan_config = get_plan_config(user.id) or {}
+            max_minutes = plan_config.get("max_recording_minutes")
+
+            if max_minutes:
+                duration_seconds = get_audio_duration_seconds(temp_path)
+                max_seconds = max_minutes * 60
+
+                print(
+                    f"[{job_id}] Audio duration: "
+                    f"{duration_seconds:.2f} seconds"
+                )
+
+                if duration_seconds > max_seconds + 1:
+                    os.remove(temp_path)
+                    temp_path = None
+                    transcription_jobs[job_id]["status"] = "failed"
+                    transcription_jobs[job_id]["error"] = (
+                        f"Free plan recordings are limited to {max_minutes} minutes. "
+                        "Please record a shorter audio or upgrade your plan."
+                    )
+                    return jsonify({
+                        "success": False,
+                        "error": transcription_jobs[job_id]["error"],
+                        "code": "recording_duration_limit_reached",
+                    }), 403
+
+        # ----------------------------------------------------
         # START BACKGROUND WORKER
         # ----------------------------------------------------
 
@@ -1572,7 +1687,8 @@ def transcribe():
             args=(
                 job_id,
                 temp_path,
-                file_extension
+                file_extension,
+                user.id
             ),
             daemon=True
         )
