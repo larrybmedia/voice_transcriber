@@ -12,7 +12,19 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from groq import Groq
 from flask_migrate import Migrate
-from models import db, User
+from models import (
+    db,
+    User,
+    Subscription,
+    UserCredit,
+    CreditTransaction,
+)
+
+from subscription_service import (
+    authorize_action,
+    check_action,
+)
+
 import resend
 
 import jwt
@@ -235,7 +247,10 @@ def register():
             "error": "An account with this email already exists."
         }), 409
 
-    # Create user
+    # ============================================================
+    # CREATE USER
+    # ============================================================
+
     user = User(
         email=email
     )
@@ -243,8 +258,59 @@ def register():
     # Hash password
     user.set_password(password)
 
-    # Save user
+    # Add user first so we get the user ID.
     db.session.add(user)
+    db.session.flush()
+
+
+    # ============================================================
+    # CREATE FREE SUBSCRIPTION
+    # ============================================================
+
+    free_subscription = Subscription(
+        user_id=user.id,
+        plan="free",
+        billing_cycle="free",
+        amount=0,
+        start_date=datetime.now(timezone.utc),
+        end_date=None,
+        status="active",
+    )
+
+    db.session.add(free_subscription)
+
+
+    # ============================================================
+    # CREATE 5 FREE CREDITS
+    # ============================================================
+
+    credit_account = UserCredit(
+        user_id=user.id,
+        credits=5,
+        used_credits=0,
+    )
+
+    db.session.add(credit_account)
+
+
+    # ============================================================
+    # RECORD INITIAL CREDIT ALLOCATION
+    # ============================================================
+
+    credit_transaction = CreditTransaction(
+        user_id=user.id,
+        action="registration",
+        credits_used=0,
+        recording_id=None,
+    )
+
+    db.session.add(credit_transaction)
+
+
+    # ============================================================
+    # SAVE EVERYTHING
+    # ============================================================
+
     db.session.commit()
 
     return jsonify({
@@ -330,6 +396,106 @@ def login():
     }), 200
 
 
+def get_authenticated_user():
+
+    auth_header = request.headers.get("Authorization")
+
+    if not auth_header:
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Authorization header is required."
+            }),
+            401
+        )
+
+    if not auth_header.startswith("Bearer "):
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Invalid authorization format."
+            }),
+            401
+        )
+
+    token = auth_header.split(" ", 1)[1].strip()
+
+    if not token:
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Token is required."
+            }),
+            401
+        )
+
+    try:
+
+        payload = jwt.decode(
+            token,
+            jwt_secret_key,
+            algorithms=[JWT_ALGORITHM]
+        )
+
+        user_id = payload.get("sub")
+
+        if not user_id:
+            return None, (
+                jsonify({
+                    "success": False,
+                    "error": "Invalid token."
+                }),
+                401
+            )
+
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            return None, (
+                jsonify({
+                    "success": False,
+                    "error": "Invalid user ID in token."
+                }),
+                401
+            )
+
+        user = db.session.get(
+            User,
+            user_id
+        )
+
+        if not user:
+            return None, (
+                jsonify({
+                    "success": False,
+                    "error": "User not found."
+                }),
+                404
+            )
+
+        return user, None
+
+    except jwt.ExpiredSignatureError:
+
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Token has expired."
+            }),
+            401
+        )
+
+    except jwt.InvalidTokenError:
+
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Invalid token."
+            }),
+            401
+        )
+
+    
 # ============================================================
 # AUTHENTICATION - CURRENT USER
 # ============================================================
@@ -712,6 +878,181 @@ def reset_password():
         "success": True,
         "message": "Password reset successfully. You can now log in."
     }), 200
+
+
+# ============================================================
+# SUBSCRIPTION / CREDIT CHECK
+# ============================================================
+
+@app.route(
+    "/api/subscription/check",
+    methods=["POST"]
+)
+def check_subscription_action():
+
+    # --------------------------------------------------------
+    # AUTHENTICATE USER
+    # --------------------------------------------------------
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    # --------------------------------------------------------
+    # READ REQUEST
+    # --------------------------------------------------------
+
+    data = request.get_json(silent=True) or {}
+
+    action = data.get("action")
+
+    if not action:
+        return jsonify({
+            "success": False,
+            "error": "Action is required."
+        }), 400
+
+    # --------------------------------------------------------
+    # ALLOWED ACTIONS
+    # --------------------------------------------------------
+
+    allowed_actions = {
+        "record",
+        "meeting_record",
+        "upload",
+    }
+
+    if action not in allowed_actions:
+        return jsonify({
+            "success": False,
+            "error": "Invalid action."
+        }), 400
+
+    # --------------------------------------------------------
+    # CHECK SUBSCRIPTION + CREDIT
+    # --------------------------------------------------------
+
+    success, message = check_action(
+        user_id=user.id,
+        action=action,
+    )
+
+    if not success:
+        return jsonify({
+            "success": False,
+            "error": message,
+        }), 403
+
+    # --------------------------------------------------------
+    # GET CURRENT CREDIT BALANCE
+    # --------------------------------------------------------
+
+    credit_account = UserCredit.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    remaining_credits = (
+        credit_account.credits
+        if credit_account
+        else 0
+    )
+
+    return jsonify({
+        "success": True,
+        "message": message,
+        "action": action,
+        "remaining_credits": remaining_credits,
+    }), 200
+
+
+# ============================================================
+# SUBSCRIPTION / CREDIT AUTHORIZATION
+# ============================================================
+
+@app.route(
+    "/api/subscription/authorize",
+    methods=["POST"]
+)
+def authorize_subscription_action():
+
+    # --------------------------------------------------------
+    # AUTHENTICATE USER
+    # --------------------------------------------------------
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    # --------------------------------------------------------
+    # READ REQUEST
+    # --------------------------------------------------------
+
+    data = request.get_json(silent=True) or {}
+
+    action = data.get("action")
+    recording_id = data.get("recording_id")
+
+    if not action:
+        return jsonify({
+            "success": False,
+            "error": "Action is required."
+        }), 400
+
+    # --------------------------------------------------------
+    # ALLOWED ACTIONS
+    # --------------------------------------------------------
+
+    allowed_actions = {
+        "record",
+        "meeting_record",
+        "upload",
+    }
+
+    if action not in allowed_actions:
+        return jsonify({
+            "success": False,
+            "error": "Invalid action."
+        }), 400
+
+    # --------------------------------------------------------
+    # CHECK SUBSCRIPTION + CREDIT
+    # --------------------------------------------------------
+
+    success, message = authorize_action(
+        user_id=user.id,
+        action=action,
+        recording_id=recording_id,
+    )
+
+    if not success:
+        return jsonify({
+            "success": False,
+            "error": message,
+        }), 403
+
+    # --------------------------------------------------------
+    # GET UPDATED CREDIT BALANCE
+    # --------------------------------------------------------
+
+    credit_account = UserCredit.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    remaining_credits = (
+        credit_account.credits
+        if credit_account
+        else 0
+    )
+
+    return jsonify({
+        "success": True,
+        "message": message,
+        "action": action,
+        "remaining_credits": remaining_credits,
+    }), 200
+
 
 # ----------------------------------------------------
 # TRANSCRIPTION STATUS
@@ -1125,6 +1466,15 @@ def process_transcription_job(
     methods=["POST"]
 )
 def transcribe():
+
+    # --------------------------------------------------------
+    # AUTHENTICATE USER
+    # --------------------------------------------------------
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
 
     # --------------------------------------------------------
     # CHECK THAT AN AUDIO FILE WAS UPLOADED
