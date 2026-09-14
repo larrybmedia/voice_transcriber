@@ -1477,7 +1477,10 @@ def free_transcription_remaining_today(user_id):
         CreditTransaction.action == "transcription",
         CreditTransaction.created_at >= start_of_day,
     ).count()
-    return max(0, 1 - used)
+    daily_limit = get_daily_transcription_limit(user_id)
+    if daily_limit is None:
+        return None
+    return max(0, daily_limit - used)
 
 
 def get_audio_duration_seconds(file_path):
@@ -1795,3 +1798,5 @@ if __name__ == "__main__":
         port=5000,
         debug=True
     )
+
+
