@@ -15,10 +15,10 @@ PLAN_CONFIG = {
         "6_months": 0,
         "yearly": 0,
         "record": True,
-        "meeting_record": False,
-        "upload": False,
-        "max_recording_minutes": 10,
-        "daily_transcriptions": 1,
+        "meeting_record": True,
+        "upload": True,
+        "max_recording_minutes": 30,
+        "daily_transcriptions": 3,
     },
 
     "gold": {
