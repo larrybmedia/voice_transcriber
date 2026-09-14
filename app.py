@@ -1011,7 +1011,7 @@ def check_subscription_action():
             if remaining_daily <= 0:
                 return jsonify({
                     "success": False,
-                    "error": "Your Free plan allows 1 transcription per day. Please try again tomorrow or upgrade your plan.",
+                    "error": "Your Free plan allows 3 transcriptions per day. Please try again tomorrow or upgrade your plan.",
                     "code": "daily_transcription_limit_reached",
                     "remaining_daily_transcriptions": 0,
                 }), 403
@@ -1546,7 +1546,7 @@ def transcribe():
     if plan == "free" and free_transcription_remaining_today(user.id) <= 0:
         return jsonify({
             "success": False,
-            "error": "Your Free plan allows 1 transcription per day. Please try again tomorrow or upgrade your plan.",
+            "error": "Your Free plan allows 3 transcriptions per day. Please try again tomorrow or upgrade your plan.",
             "code": "daily_transcription_limit_reached",
         }), 403
 
@@ -1802,6 +1802,7 @@ if __name__ == "__main__":
         port=5000,
         debug=True
     )
+
 
 
 
