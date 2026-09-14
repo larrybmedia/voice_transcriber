@@ -1639,14 +1639,16 @@ def transcribe():
 
         # Free recordings are limited to 10 minutes. Gold and Enterprise
         # recordings are unlimited and continue to be processed in chunks.
-        if plan == "free":
+        max_recording_minutes = config.get("max_recording_minutes")
+        if plan == "free" and max_recording_minutes is not None:
             duration_seconds = get_audio_duration_seconds(temp_path)
-            if duration_seconds > 600:
+            max_duration_seconds = max_recording_minutes * 60
+            if duration_seconds > max_duration_seconds:
                 os.remove(temp_path)
                 transcription_jobs.pop(job_id, None)
                 return jsonify({
                     "success": False,
-                    "error": "Free plan recordings are limited to 10 minutes.",
+                    "error": f"Free plan recordings are limited to {max_recording_minutes} minutes.",
                     "code": "recording_duration_limit_reached",
                 }), 403
 
@@ -1800,6 +1802,9 @@ if __name__ == "__main__":
         port=5000,
         debug=True
     )
+
+
+
 
 
 
