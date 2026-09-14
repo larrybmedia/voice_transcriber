@@ -753,6 +753,92 @@ def forgot_password():
 
     return jsonify(generic_response), 200
 
+# ============================================================
+# ACCOUNT - DELETE
+# ============================================================
+
+@app.route(
+    "/api/account",
+    methods=["DELETE"]
+)
+def delete_account():
+
+    # --------------------------------------------------------
+    # AUTHENTICATE USER
+    # --------------------------------------------------------
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    try:
+
+        user_id = user.id
+
+        # ----------------------------------------------------
+        # DELETE USER SUBSCRIPTIONS
+        # ----------------------------------------------------
+
+        Subscription.query.filter_by(
+            user_id=user_id
+        ).delete(
+            synchronize_session=False
+        )
+
+        # ----------------------------------------------------
+        # DELETE USER CREDIT ACCOUNT
+        # ----------------------------------------------------
+
+        UserCredit.query.filter_by(
+            user_id=user_id
+        ).delete(
+            synchronize_session=False
+        )
+
+        # ----------------------------------------------------
+        # DELETE USER CREDIT TRANSACTIONS
+        # ----------------------------------------------------
+
+        CreditTransaction.query.filter_by(
+            user_id=user_id
+        ).delete(
+            synchronize_session=False
+        )
+
+        # ----------------------------------------------------
+        # DELETE USER ACCOUNT
+        # ----------------------------------------------------
+
+        db.session.delete(user)
+
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": (
+                "Your NabTranscriber account and "
+                "associated account data have been deleted."
+            )
+        }), 200
+
+    except Exception as e:
+
+        db.session.rollback()
+
+        print(
+            "Account deletion failed:",
+            e
+        )
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "We could not delete your account. "
+                "Please try again later."
+            )
+        }), 500
+
 
 # ============================================================
 # AUTHENTICATION - RESET PASSWORD
