@@ -1022,7 +1022,6 @@ def check_subscription_action():
             "action": action,
             "plan": plan,
             "remaining_daily_transcriptions": remaining_daily,
-            "max_recording_minutes": config.get("max_recording_minutes"),
         }), 200
 
     if not config.get(action, False):
@@ -1038,7 +1037,6 @@ def check_subscription_action():
         "message": "Action authorized.",
         "action": action,
         "plan": plan,
-        "max_recording_minutes": config.get("max_recording_minutes"),
     }), 200
 
 
@@ -1083,7 +1081,6 @@ def authorize_subscription_action():
         "message": "Action authorized.",
         "action": action,
         "plan": plan,
-        "max_recording_minutes": config.get("max_recording_minutes"),
     }), 200
 
 
@@ -1636,21 +1633,6 @@ def transcribe():
             f"Audio received: "
             f"{file_size} bytes"
         )
-
-        # Free recordings are limited to 10 minutes. Gold and Enterprise
-        # recordings are unlimited and continue to be processed in chunks.
-        max_recording_minutes = config.get("max_recording_minutes")
-        if plan == "free" and max_recording_minutes is not None:
-            duration_seconds = get_audio_duration_seconds(temp_path)
-            max_duration_seconds = max_recording_minutes * 60
-            if duration_seconds > max_duration_seconds:
-                os.remove(temp_path)
-                transcription_jobs.pop(job_id, None)
-                return jsonify({
-                    "success": False,
-                    "error": f"Free plan recordings are limited to {max_recording_minutes} minutes.",
-                    "code": "recording_duration_limit_reached",
-                }), 403
 
         # ----------------------------------------------------
         # START BACKGROUND WORKER

@@ -17,7 +17,7 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": True,
         "upload": True,
-        "max_recording_minutes": 30,
+        "max_recording_minutes": None,
         "daily_transcriptions": 3,
     },
 
@@ -26,8 +26,9 @@ PLAN_CONFIG = {
         "6_months": 28000,
         "yearly": 55000,
         "record": True,
-        "meeting_record": False,
-        "upload": False,
+        "meeting_record": True,
+        "upload": True,
+	"max_recording_minutes": None,
         "daily_transcriptions": None,
     },
 
@@ -38,6 +39,7 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": True,
         "upload": True,
+	"max_recording_minutes": None,
         "daily_transcriptions": None,
     },
 }
