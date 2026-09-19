@@ -1634,6 +1634,44 @@ def transcribe():
             f"{file_size} bytes"
         )
 
+
+        # ----------------------------------------------------
+        # FREE PLAN 30-MINUTE RECORDING LIMIT
+        # ----------------------------------------------------
+
+        max_recording_minutes = config.get(
+            "max_recording_minutes"
+        )
+
+        if (
+            plan == "free"
+            and max_recording_minutes is not None
+        ):
+            duration_seconds = get_audio_duration_seconds(
+                temp_path
+            )
+
+            max_duration_seconds = (
+                max_recording_minutes * 60
+            )
+
+            if duration_seconds > max_duration_seconds:
+                os.remove(temp_path)
+
+                transcription_jobs.pop(
+                    job_id,
+                    None
+                )
+
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        "Free plan recordings are limited "
+                        f"to {max_recording_minutes} minutes."
+                    ),
+                    "code": "recording_duration_limit_reached",
+                }), 403
+
         # ----------------------------------------------------
         # START BACKGROUND WORKER
         # ----------------------------------------------------
