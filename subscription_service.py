@@ -14,7 +14,7 @@ PLAN_CONFIG = {
         "monthly": 0,
         "6_months": 0,
         "yearly": 0,
-        "record": False,
+        "record": True,
         "meeting_record": False,
         "upload": False,
         "max_recording_minutes": 30,
