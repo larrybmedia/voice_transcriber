@@ -160,7 +160,7 @@ def get_daily_transcription_limit(user_id):
     Return the user's daily transcription limit.
 
     Free:
-        3 transcriptions per day
+        2 transcriptions per day
 
     Gold:
         Unlimited
@@ -220,10 +220,9 @@ def check_free_transcription_limit(user_id, transcriptions_today):
         and transcriptions_today >= daily_limit
     ):
         return False, (
-            "Your Free plan allows 3 transcriptions "
+            "Your Free plan allows 2 transcriptions "
             "per day. Please try again tomorrow or "
             "upgrade your plan."
         )
 
     return True, "Free transcription available."
-
