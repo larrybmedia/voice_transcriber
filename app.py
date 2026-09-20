@@ -444,6 +444,8 @@ def get_authenticated_user():
         user_id = payload.get("sub")
 
         if not user_id:
+            print("JWT PAYLOAD HAS NO SUB:", payload)
+
             return None, (
                 jsonify({
                     "success": False,
