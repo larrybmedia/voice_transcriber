@@ -971,6 +971,66 @@ def reset_password():
 
 
 # ============================================================
+# TEMPORARY GOOGLE PLAY REVIEWER ACCESS
+# REMOVE AFTER PLAY STORE REVIEW ACCOUNT IS CONFIGURED
+# ============================================================
+
+@app.route(
+    "/api/reviewer/enterprise",
+    methods=["POST"]
+)
+def temporary_reviewer_enterprise():
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    reviewer_email = "nabtranscriber.review@gmail.com"
+
+    if user.email.lower() != reviewer_email.lower():
+        return jsonify({
+            "success": False,
+            "error": "Not authorized."
+        }), 403
+
+    # Check for an existing active subscription
+    subscription = get_active_subscription(user.id)
+
+    if subscription:
+        subscription.plan = "enterprise"
+        subscription.billing_cycle = "reviewer"
+        subscription.amount = 0
+        subscription.status = "active"
+        subscription.start_date = datetime.now(timezone.utc)
+        subscription.end_date = None
+        subscription.payment_reference = "google-play-reviewer"
+
+    else:
+        subscription = Subscription(
+            user_id=user.id,
+            plan="enterprise",
+            billing_cycle="reviewer",
+            amount=0,
+            start_date=datetime.now(timezone.utc),
+            end_date=None,
+            status="active",
+            payment_reference="google-play-reviewer",
+        )
+
+        db.session.add(subscription)
+
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "Reviewer account upgraded to Enterprise.",
+        "plan": "enterprise",
+        "status": "active",
+    }), 200
+
+
+# ============================================================
 # SUBSCRIPTION / CREDIT CHECK
 # ============================================================
 
