@@ -494,9 +494,13 @@ def get_authenticated_user():
     except jwt.InvalidTokenError as e:
         print("JWT DECODE ERROR:", type(e).__name__, str(e))
 
-        return None, jsonify({
-            "error": "Invalid token."
-        }), 401
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Invalid token."
+            }),
+            401
+        )
 
     
 # ============================================================
