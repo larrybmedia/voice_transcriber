@@ -1,9 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from flask import current_app
 
 from models import (
+    Payment,
     Subscription,
+    db,
 )
-
 
 # ============================================================
 # PLAN CONFIGURATION
@@ -226,3 +229,170 @@ def check_free_transcription_limit(user_id, transcriptions_today):
         )
 
     return True, "Free transcription available."
+
+
+# ============================================================
+# PAYMENT SUCCESS → ACTIVATE SUBSCRIPTION
+# ============================================================
+
+def activate_subscription_from_payment(
+    user_id,
+    plan,
+    billing_cycle,
+    amount,
+    payment_gateway,
+    transaction_reference,
+):
+    """
+    Record a successful payment and activate the
+    corresponding subscription.
+
+    This function should only be called after the
+    payment has been verified as successful.
+    """
+
+    plan = (plan or "").strip().lower()
+    billing_cycle = (
+        (billing_cycle or "").strip().lower()
+    )
+
+    valid_plans = {
+        "gold",
+        "enterprise",
+    }
+
+    if plan not in valid_plans:
+        raise ValueError(
+            "Only Gold and Enterprise plans "
+            "can be activated through payment."
+        )
+
+    valid_billing_cycles = {
+        "monthly",
+        "6_months",
+        "yearly",
+    }
+
+    if billing_cycle not in valid_billing_cycles:
+        raise ValueError(
+            "Invalid billing cycle."
+        )
+
+    config = get_plan_config(plan)
+
+    expected_amount = config.get(
+        billing_cycle
+    )
+
+    if expected_amount is None:
+        raise ValueError(
+            "Invalid plan or billing cycle."
+        )
+
+    if int(amount) != int(expected_amount):
+        raise ValueError(
+            "Payment amount does not match "
+            "the selected subscription plan."
+        )
+
+    existing_payment = Payment.query.filter_by(
+        transaction_reference=transaction_reference
+    ).first()
+
+    if existing_payment:
+        if existing_payment.user_id != user_id:
+            raise ValueError(
+                "This transaction reference belongs to another user."
+            )
+
+        if existing_payment.status == "successful":
+            return (
+                existing_payment,
+                get_active_subscription(user_id),
+            )
+
+        if existing_payment.status != "pending":
+            raise ValueError(
+                "This transaction reference cannot be activated."
+            )
+
+        payment = existing_payment
+    else:
+        payment = None
+
+    now = datetime.now(timezone.utc)
+
+    if billing_cycle == "monthly":
+        end_date = now + timedelta(days=30)
+
+    elif billing_cycle == "6_months":
+        end_date = now + timedelta(days=182)
+
+    else:
+        end_date = now + timedelta(days=365)
+
+    subscription = get_active_subscription(
+        user_id
+    )
+
+    if subscription:
+        subscription.plan = plan
+        subscription.billing_cycle = billing_cycle
+        subscription.amount = expected_amount
+        subscription.start_date = now
+        subscription.end_date = end_date
+        subscription.status = "active"
+        subscription.payment_reference = (
+            transaction_reference
+        )
+
+    else:
+        subscription = Subscription(
+            user_id=user_id,
+            plan=plan,
+            billing_cycle=billing_cycle,
+            amount=expected_amount,
+            start_date=now,
+            end_date=end_date,
+            status="active",
+            payment_reference=(
+                transaction_reference
+            ),
+        )
+
+        db.session.add(subscription)
+        db.session.flush()
+
+    if payment is None:
+        payment = Payment(
+            user_id=user_id,
+            subscription_id=subscription.id,
+            plan=plan,
+            billing_cycle=billing_cycle,
+            amount=expected_amount,
+            currency="NGN",
+            payment_gateway=payment_gateway,
+            transaction_reference=transaction_reference,
+            status="successful",
+            paid_at=now,
+        )
+
+        db.session.add(payment)
+
+    else:
+        payment.subscription_id = subscription.id
+        payment.plan = plan
+        payment.billing_cycle = billing_cycle
+        payment.amount = expected_amount
+        payment.currency = "NGN"
+        payment.payment_gateway = payment_gateway
+        payment.status = "successful"
+        payment.paid_at = now
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
+
+    return payment, subscription

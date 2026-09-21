@@ -31,6 +31,13 @@ class User(db.Model):
         nullable=False
     )
 
+    role = db.Column(
+        db.String(50),
+        nullable=False,
+        default="user",
+        server_default="user"
+    )
+
     # --------------------------------------------------------
     # PASSWORD RESET
     # --------------------------------------------------------
@@ -179,15 +186,22 @@ class Subscription(db.Model):
     )
 
     def is_active(self):
-        now = datetime.now(timezone.utc)
-
         if self.status != "active":
             return False
 
-        if self.end_date is not None:
-            return self.end_date > now
+        if self.end_date is None:
+            return True
 
-        return True
+        end_date = self.end_date
+
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(
+                tzinfo=timezone.utc
+            )
+
+        now = datetime.now(timezone.utc)
+
+        return end_date > now
 
     def to_dict(self):
         return {
@@ -214,6 +228,100 @@ class Subscription(db.Model):
                 if self.created_at
                 else None
             )
+        }
+
+
+class Payment(db.Model):
+    __tablename__ = "payments"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id"),
+        nullable=False
+    )
+
+    subscription_id = db.Column(
+        db.Integer,
+        db.ForeignKey("subscriptions.id"),
+        nullable=True
+    )
+
+    plan = db.Column(
+        db.String(50),
+        nullable=False
+    )
+
+    billing_cycle = db.Column(
+        db.String(50),
+        nullable=False
+    )
+
+    amount = db.Column(
+        db.Integer,
+        nullable=False
+    )
+
+    currency = db.Column(
+        db.String(10),
+        nullable=False,
+        default="NGN"
+    )
+
+    payment_gateway = db.Column(
+        db.String(50),
+        nullable=True
+    )
+
+    transaction_reference = db.Column(
+        db.String(255),
+        nullable=True,
+        unique=True
+    )
+
+    status = db.Column(
+        db.String(50),
+        nullable=False,
+        default="pending"
+    )
+
+    paid_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True
+    )
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "subscription_id": self.subscription_id,
+            "plan": self.plan,
+            "billing_cycle": self.billing_cycle,
+            "amount": self.amount,
+            "currency": self.currency,
+            "payment_gateway": self.payment_gateway,
+            "transaction_reference": self.transaction_reference,
+            "status": self.status,
+            "paid_at": (
+                self.paid_at.isoformat()
+                if self.paid_at
+                else None
+            ),
+            "created_at": (
+                self.created_at.isoformat()
+                if self.created_at
+                else None
+            ),
         }
 
 

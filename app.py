@@ -6,6 +6,8 @@ import subprocess
 import shutil
 import threading
 import uuid
+import hmac
+import hashlib
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -18,6 +20,7 @@ from models import (
     Subscription,
     UserCredit,
     CreditTransaction,
+    Payment,
 )
 
 from subscription_service import (
@@ -26,6 +29,7 @@ from subscription_service import (
     get_active_subscription,
     has_plan_permission,
     get_daily_transcription_limit,
+    activate_subscription_from_payment,
 )
 
 
@@ -33,6 +37,11 @@ import resend
 
 import jwt
 from datetime import datetime, timedelta, timezone
+from paystack_service import (
+    PAYSTACK_SECRET_KEY,
+    initialize_transaction,
+    verify_transaction,
+)
 
 
 # ============================================================
@@ -502,6 +511,1037 @@ def get_authenticated_user():
             401
         )
 
+
+# ============================================================
+# ADMIN AUTHORIZATION
+# ============================================================
+
+def require_admin():
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return None, auth_error
+
+    if user.role != "admin":
+        return None, (
+            jsonify({
+                "success": False,
+                "error": "Admin access required."
+            }),
+            403
+        )
+
+    return user, None
+
+
+# ============================================================
+# ADMIN - DASHBOARD SUMMARY
+# ============================================================
+
+@app.route(
+    "/api/admin/dashboard",
+    methods=["GET"]
+)
+def admin_dashboard():
+
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    total_users = User.query.count()
+
+    total_admins = User.query.filter_by(
+        role="admin"
+    ).count()
+
+    total_free_users = Subscription.query.filter_by(
+        plan="free",
+        status="active"
+    ).count()
+
+    total_gold_users = Subscription.query.filter_by(
+        plan="gold",
+        status="active"
+    ).count()
+
+    total_enterprise_users = Subscription.query.filter_by(
+        plan="enterprise",
+        status="active"
+    ).count()
+
+    total_active_subscriptions = Subscription.query.filter_by(
+        status="active"
+    ).count()
+
+    return jsonify({
+        "success": True,
+        "dashboard": {
+            "total_users": total_users,
+            "total_admins": total_admins,
+            "total_free_users": total_free_users,
+            "total_gold_users": total_gold_users,
+            "total_enterprise_users": total_enterprise_users,
+            "total_active_subscriptions": total_active_subscriptions,
+        }
+    }), 200
+
+
+# ============================================================
+# ADMIN - USERS
+# ============================================================
+
+@app.route(
+    "/api/admin/users",
+    methods=["GET"]
+)
+def admin_users():
+
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    # --------------------------------------------------------
+    # Pagination
+    # --------------------------------------------------------
+
+    try:
+        page = int(
+            request.args.get(
+                "page",
+                1
+            )
+        )
+
+        per_page = int(
+            request.args.get(
+                "per_page",
+                20
+            )
+        )
+
+    except (ValueError, TypeError):
+
+        return jsonify({
+            "success": False,
+            "error": "Invalid pagination values."
+        }), 400
+
+    if page < 1:
+        page = 1
+
+    if per_page < 1:
+        per_page = 20
+
+    if per_page > 100:
+        per_page = 100
+
+    # --------------------------------------------------------
+    # Search
+    # --------------------------------------------------------
+
+    search = request.args.get(
+        "search",
+        ""
+    ).strip().lower()
+
+    query = User.query
+
+    if search:
+        query = query.filter(
+            User.email.ilike(
+                f"%{search}%"
+            )
+        )
+
+    # --------------------------------------------------------
+    # Get paginated users
+    # --------------------------------------------------------
+
+    pagination = query.order_by(
+        User.created_at.desc()
+    ).paginate(
+        page=page,
+        per_page=per_page,
+        error_out=False
+    )
+
+    users = []
+
+    for user in pagination.items:
+
+        subscription = Subscription.query.filter_by(
+            user_id=user.id,
+            status="active"
+        ).order_by(
+            Subscription.created_at.desc()
+        ).first()
+
+        users.append({
+            "id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "created_at": (
+                user.created_at.isoformat()
+                if user.created_at
+                else None
+            ),
+            "subscription": (
+                subscription.to_dict()
+                if subscription
+                else None
+            )
+        })
+
+    return jsonify({
+        "success": True,
+        "users": users,
+        "pagination": {
+            "page": pagination.page,
+            "per_page": pagination.per_page,
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "has_next": pagination.has_next,
+            "has_prev": pagination.has_prev,
+        }
+    }), 200
+
+
+# ============================================================
+# ADMIN - USER DETAILS
+# ============================================================
+
+@app.route(
+    "/api/admin/users/<int:user_id>",
+    methods=["GET"]
+)
+def admin_user_details(user_id):
+
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    user = db.session.get(
+        User,
+        user_id
+    )
+
+    if not user:
+        return jsonify({
+            "success": False,
+            "error": "User not found."
+        }), 404
+
+    # --------------------------------------------------------
+    # Active subscription
+    # --------------------------------------------------------
+
+    subscription = Subscription.query.filter_by(
+        user_id=user.id,
+        status="active"
+    ).order_by(
+        Subscription.created_at.desc()
+    ).first()
+
+    # --------------------------------------------------------
+    # Credit account
+    # --------------------------------------------------------
+
+    credit_account = UserCredit.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    # --------------------------------------------------------
+    # Build response
+    # --------------------------------------------------------
+
+    return jsonify({
+        "success": True,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "created_at": (
+                user.created_at.isoformat()
+                if user.created_at
+                else None
+            ),
+            "updated_at": (
+                user.updated_at.isoformat()
+                if user.updated_at
+                else None
+            ),
+            "subscription": (
+                subscription.to_dict()
+                if subscription
+                else None
+            ),
+            "credits": (
+                credit_account.to_dict()
+                if credit_account
+                else None
+            )
+        }
+    }), 200
+
+
+# ============================================================
+# ADMIN - UPDATE USER SUBSCRIPTION
+# ============================================================
+
+@app.route(
+    "/api/admin/users/<int:user_id>/subscription",
+    methods=["PATCH"]
+)
+def admin_update_user_subscription(user_id):
+
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    user = db.session.get(
+        User,
+        user_id
+    )
+
+    if not user:
+        return jsonify({
+            "success": False,
+            "error": "User not found."
+        }), 404
+
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({
+            "success": False,
+            "error": "Request body must be JSON."
+        }), 400
+
+    plan = str(
+        data.get("plan", "")
+    ).strip().lower()
+
+    billing_cycle = str(
+        data.get("billing_cycle", "")
+    ).strip().lower()
+
+    valid_plans = {
+        "free",
+        "gold",
+        "enterprise",
+    }
+
+    if plan not in valid_plans:
+        return jsonify({
+            "success": False,
+            "error": "Invalid subscription plan."
+        }), 400
+
+    # --------------------------------------------------------
+    # Validate billing cycle
+    # --------------------------------------------------------
+
+    if plan == "free":
+
+        billing_cycle = "free"
+
+    else:
+
+        valid_billing_cycles = {
+            "monthly",
+            "6_months",
+            "yearly",
+        }
+
+        if billing_cycle not in valid_billing_cycles:
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Billing cycle must be monthly, "
+                    "6_months, or yearly."
+                )
+            }), 400
+
+    # --------------------------------------------------------
+    # Get plan configuration
+    # --------------------------------------------------------
+
+    config = get_plan_config(plan)
+
+    if not config:
+        return jsonify({
+            "success": False,
+            "error": "Subscription plan configuration not found."
+        }), 400
+
+    amount = config.get(
+        billing_cycle,
+        0
+    )
+
+    now = datetime.now(timezone.utc)
+
+    # --------------------------------------------------------
+    # Calculate subscription end date
+    # --------------------------------------------------------
+
+    end_date = None
+
+    if plan != "free":
+
+        if billing_cycle == "monthly":
+            end_date = now + timedelta(
+                days=30
+            )
+
+        elif billing_cycle == "6_months":
+            end_date = now + timedelta(
+                days=182
+            )
+
+        elif billing_cycle == "yearly":
+            end_date = now + timedelta(
+                days=365
+            )
+
+    # --------------------------------------------------------
+    # Find existing active subscription
+    # --------------------------------------------------------
+
+    subscription = get_active_subscription(
+        user.id
+    )
+
+    if subscription:
+
+        subscription.plan = plan
+        subscription.billing_cycle = billing_cycle
+        subscription.amount = amount
+        subscription.start_date = now
+        subscription.end_date = end_date
+        subscription.status = "active"
+        subscription.payment_reference = (
+            "admin-manual-assignment"
+        )
+
+    else:
+
+        subscription = Subscription(
+            user_id=user.id,
+            plan=plan,
+            billing_cycle=billing_cycle,
+            amount=amount,
+            start_date=now,
+            end_date=end_date,
+            status="active",
+            payment_reference=(
+                "admin-manual-assignment"
+            ),
+        )
+
+        db.session.add(
+            subscription
+        )
+
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "User subscription updated successfully.",
+        "subscription": subscription.to_dict(),
+    }), 200
+
+
+# ============================================================
+# PAYSTACK PAYMENT INITIALIZATION
+# ============================================================
+
+@app.route(
+    "/api/payment/initialize",
+    methods=["POST"]
+)
+def payment_initialize():
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({
+            "success": False,
+            "error": "Request body must be JSON."
+        }), 400
+
+    plan = str(
+        data.get("plan", "")
+    ).strip().lower()
+
+    billing_cycle = str(
+        data.get("billing_cycle", "")
+    ).strip().lower()
+
+    valid_plans = {
+        "gold",
+        "enterprise",
+    }
+
+    if plan not in valid_plans:
+        return jsonify({
+            "success": False,
+            "error": (
+                "Only Gold and Enterprise plans "
+                "can be purchased."
+            )
+        }), 400
+
+    valid_billing_cycles = {
+        "monthly",
+        "6_months",
+        "yearly",
+    }
+
+    if billing_cycle not in valid_billing_cycles:
+        return jsonify({
+            "success": False,
+            "error": (
+                "Billing cycle must be monthly, "
+                "6_months, or yearly."
+            )
+        }), 400
+
+    config = get_plan_config(plan)
+
+    if not config:
+        return jsonify({
+            "success": False,
+            "error": "Subscription plan not found."
+        }), 400
+
+    amount = config.get(
+        billing_cycle
+    )
+
+    if amount is None:
+        return jsonify({
+            "success": False,
+            "error": "Invalid subscription pricing."
+        }), 400
+
+    reference = (
+        f"NAB-{plan.upper()}-"
+        f"{billing_cycle.upper()}-"
+        f"{uuid.uuid4().hex[:12].upper()}"
+    )
+
+    callback_url = (
+        "https://voice-transcribe-11.web.app/"
+        "payment/callback"
+    )
+
+    try:
+
+        paystack_data = initialize_transaction(
+            email=user.email,
+            amount=amount,
+            reference=reference,
+            callback_url=callback_url,
+        )
+
+    except ValueError as error:
+
+        return jsonify({
+            "success": False,
+            "error": str(error),
+        }), 400
+
+    except Exception:
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Unable to initialize "
+                "Paystack payment."
+            ),
+        }), 502
+
+    payment = Payment(
+        user_id=user.id,
+        plan=plan,
+        billing_cycle=billing_cycle,
+        amount=amount,
+        currency="NGN",
+        payment_gateway="paystack",
+        transaction_reference=reference,
+        status="pending",
+    )
+
+    db.session.add(payment)
+
+    try:
+        db.session.commit()
+
+    except Exception:
+
+        db.session.rollback()
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Payment initialization could "
+                "not be recorded."
+            ),
+        }), 500
+
+    return jsonify({
+        "success": True,
+        "message": (
+            "Paystack payment initialized "
+            "successfully."
+        ),
+        "payment": {
+            "id": payment.id,
+            "plan": plan,
+            "billing_cycle": billing_cycle,
+            "amount": amount,
+            "currency": "NGN",
+            "payment_gateway": "paystack",
+            "transaction_reference": reference,
+            "status": payment.status,
+        },
+        "paystack": {
+            "authorization_url": paystack_data.get(
+                "authorization_url"
+            ),
+            "access_code": paystack_data.get(
+                "access_code"
+            ),
+            "reference": paystack_data.get(
+                "reference"
+            ),
+        },
+    }), 200
+
+
+# ============================================================
+# PAYSTACK PAYMENT VERIFICATION
+# ============================================================
+
+@app.route(
+    "/api/payment/verify",
+    methods=["POST"]
+)
+def payment_verify():
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({
+            "success": False,
+            "error": "Request body must be JSON."
+        }), 400
+
+    reference = str(
+        data.get("reference", "")
+    ).strip()
+
+    if not reference:
+        return jsonify({
+            "success": False,
+            "error": "Transaction reference is required."
+        }), 400
+
+    payment = Payment.query.filter_by(
+        transaction_reference=reference,
+        user_id=user.id,
+    ).first()
+
+    if not payment:
+        return jsonify({
+            "success": False,
+            "error": "Payment record not found."
+        }), 404
+
+    if payment.payment_gateway != "paystack":
+        return jsonify({
+            "success": False,
+            "error": "Invalid payment gateway."
+        }), 400
+
+    if payment.status == "successful":
+        subscription = get_active_subscription(
+            user.id
+        )
+
+        return jsonify({
+            "success": True,
+            "message": "Payment has already been verified.",
+            "payment": payment.to_dict(),
+            "subscription": (
+                subscription.to_dict()
+                if subscription
+                else None
+            ),
+        }), 200
+
+    if payment.status != "pending":
+        return jsonify({
+            "success": False,
+            "error": (
+                "This payment cannot be verified "
+                f"because its status is {payment.status}."
+            )
+        }), 400
+
+    try:
+
+        paystack_data = verify_transaction(
+            reference
+        )
+
+    except Exception:
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Unable to verify payment "
+                "with Paystack."
+            ),
+        }), 502
+
+    paystack_status = str(
+        paystack_data.get("status", "")
+    ).strip().lower()
+
+    paystack_reference = str(
+        paystack_data.get("reference", "")
+    ).strip()
+
+    try:
+        paid_amount_kobo = int(
+            paystack_data.get("amount", 0)
+        )
+    except (ValueError, TypeError):
+
+        return jsonify({
+            "success": False,
+            "error": "Invalid payment amount from Paystack."
+        }), 400
+
+    expected_amount_kobo = (
+        int(payment.amount) * 100
+    )
+
+    if paystack_reference != reference:
+        return jsonify({
+            "success": False,
+            "error": "Payment reference does not match."
+        }), 400
+
+    if paid_amount_kobo != expected_amount_kobo:
+        return jsonify({
+            "success": False,
+            "error": "Payment amount does not match."
+        }), 400
+
+    if paystack_status != "success":
+        payment.status = paystack_status or "failed"
+
+        db.session.commit()
+
+        return jsonify({
+            "success": False,
+            "message": (
+                "Paystack payment has not been "
+                "successfully completed."
+            ),
+            "payment": payment.to_dict(),
+        }), 400
+
+    try:
+
+        activated_payment, subscription = (
+            activate_subscription_from_payment(
+                user_id=user.id,
+                plan=payment.plan,
+                billing_cycle=payment.billing_cycle,
+                amount=payment.amount,
+                payment_gateway="paystack",
+                transaction_reference=reference,
+            )
+        )
+
+    except ValueError as error:
+
+        db.session.rollback()
+
+        return jsonify({
+            "success": False,
+            "error": str(error),
+        }), 400
+
+    except Exception:
+
+        db.session.rollback()
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Payment was verified, but the "
+                "subscription could not be activated."
+            ),
+        }), 500
+
+    return jsonify({
+        "success": True,
+        "message": (
+            "Payment verified and subscription "
+            "activated successfully."
+        ),
+        "payment": activated_payment.to_dict(),
+        "subscription": subscription.to_dict(),
+    }), 200
+
+
+@app.route("/api/payment/webhook", methods=["POST"])
+def paystack_webhook():
+    signature = request.headers.get("x-paystack-signature", "")
+
+    if not signature:
+        return jsonify({
+            "success": False,
+            "error": "Missing Paystack signature."
+        }), 401
+
+    payload = request.get_data()
+
+    expected_signature = hmac.new(
+        PAYSTACK_SECRET_KEY.encode("utf-8"),
+        payload,
+        hashlib.sha512
+    ).hexdigest()
+
+    if not hmac.compare_digest(
+        signature,
+        expected_signature
+    ):
+        return jsonify({
+            "success": False,
+            "error": "Invalid Paystack signature."
+        }), 401
+
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({
+            "success": False,
+            "error": "Invalid webhook payload."
+        }), 400
+
+    event = data.get("event")
+    event_data = data.get("data") or {}
+
+    if event != "charge.success":
+        return jsonify({
+            "success": True,
+            "message": "Webhook event received."
+        }), 200
+
+    reference = str(
+        event_data.get("reference", "")
+    ).strip()
+
+    if not reference:
+        return jsonify({
+            "success": False,
+            "error": "Transaction reference is missing."
+        }), 400
+
+    payment = Payment.query.filter_by(
+        transaction_reference=reference
+    ).first()
+
+    if not payment:
+        return jsonify({
+            "success": False,
+            "error": "Payment record not found."
+        }), 404
+
+    if payment.status == "successful":
+        return jsonify({
+            "success": True,
+            "message": "Payment already processed."
+        }), 200
+
+    try:
+        paid_amount_kobo = int(
+            event_data.get("amount", 0)
+        )
+    except (ValueError, TypeError):
+        return jsonify({
+            "success": False,
+            "error": "Invalid payment amount."
+        }), 400
+
+    expected_amount_kobo = int(payment.amount) * 100
+
+    if paid_amount_kobo != expected_amount_kobo:
+        return jsonify({
+            "success": False,
+            "error": "Payment amount does not match."
+        }), 400
+
+    try:
+        activated_payment, subscription = (
+            activate_subscription_from_payment(
+                user_id=payment.user_id,
+                plan=payment.plan,
+                billing_cycle=payment.billing_cycle,
+                amount=payment.amount,
+                payment_gateway="paystack",
+                transaction_reference=reference,
+            )
+        )
+
+    except ValueError as error:
+        db.session.rollback()
+
+        return jsonify({
+            "success": False,
+            "error": str(error)
+        }), 400
+
+    except Exception:
+        db.session.rollback()
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Payment was received, but the "
+                "subscription could not be activated."
+            )
+        }), 500
+
+    return jsonify({
+        "success": True,
+        "message": "Paystack payment processed successfully.",
+        "payment": activated_payment.to_dict(),
+        "subscription": subscription.to_dict(),
+    }), 200
+
+# ============================================================
+# ADMIN PAYMENT HISTORY
+# ============================================================
+
+@app.route(
+    "/api/admin/payments",
+    methods=["GET"]
+)
+def admin_payments():
+
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        page = int(
+            request.args.get("page", 1)
+        )
+        per_page = int(
+            request.args.get("per_page", 20)
+        )
+    except (ValueError, TypeError):
+        return jsonify({
+            "success": False,
+            "error": "Invalid pagination values."
+        }), 400
+
+    if page < 1:
+        page = 1
+
+    if per_page < 1:
+        per_page = 20
+
+    if per_page > 100:
+        per_page = 100
+
+    search = request.args.get(
+        "search",
+        ""
+    ).strip().lower()
+
+    status = request.args.get(
+        "status",
+        ""
+    ).strip().lower()
+
+    plan = request.args.get(
+        "plan",
+        ""
+    ).strip().lower()
+
+    query = Payment.query
+
+    if search:
+        query = query.filter(
+            db.or_(
+                Payment.transaction_reference.ilike(
+                    f"%{search}%"
+                ),
+                Payment.payment_gateway.ilike(
+                    f"%{search}%"
+                )
+            )
+        )
+
+    if status:
+        query = query.filter(
+            Payment.status == status
+        )
+
+    if plan:
+        query = query.filter(
+            Payment.plan == plan
+        )
+
+    pagination = query.order_by(
+        Payment.id.desc()
+    ).paginate(
+        page=page,
+        per_page=per_page,
+        error_out=False
+    )
+
+    payments = [
+        payment.to_dict()
+        for payment in pagination.items
+    ]
+
+    return jsonify({
+        "success": True,
+        "payments": payments,
+        "pagination": {
+            "page": pagination.page,
+            "per_page": pagination.per_page,
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "has_next": pagination.has_next,
+            "has_prev": pagination.has_prev,
+        }
+    }), 200
     
 # ============================================================
 # AUTHENTICATION - CURRENT USER
