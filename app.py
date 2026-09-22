@@ -2172,10 +2172,13 @@ def authorize_subscription_action():
 
     # Subscription permissions, not the legacy credit balance, control plan access.
     subscription = get_active_subscription(user.id)
-    if not subscription:
-        return jsonify({"success": False, "error": "No active subscription found."}), 403
 
-    plan = subscription.plan.lower()
+    # Users without an active paid subscription are treated as Free.
+    if subscription:
+        plan = subscription.plan.lower()
+    else:
+        plan = "free"
+
     config = get_plan_config(plan)
     if not config.get("record", False) and action == "transcribe":
         return jsonify({"success": False, "error": "Your current subscription plan does not allow transcription."}), 403
@@ -2616,15 +2619,17 @@ def transcribe():
     # --------------------------------------------------------
 
     user, auth_error = get_authenticated_user()
-
     if auth_error:
         return auth_error
 
     subscription = get_active_subscription(user.id)
-    if not subscription:
-        return jsonify({"success": False, "error": "No active subscription found."}), 403
 
-    plan = subscription.plan.lower()
+    # Users without an active paid subscription are treated as Free.
+    if subscription:
+        plan = subscription.plan.lower()
+    else:
+        plan = "free"
+
     config = get_plan_config(plan)
     source = (request.form.get("source") or "recording").strip().lower()
     if source in {"upload_audio", "file", "uploaded"}:
