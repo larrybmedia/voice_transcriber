@@ -2097,10 +2097,14 @@ def check_subscription_action():
         return jsonify({"success": False, "error": "Invalid action."}), 400
 
     subscription = get_active_subscription(user.id)
-    if not subscription:
-        return jsonify({"success": False, "error": "No active subscription found."}), 403
 
-    plan = subscription.plan.lower()
+    # Users without a paid/active subscription are treated
+    # as Free users and receive the Free plan limits.
+    if subscription:
+        plan = subscription.plan.lower()
+    else:
+        plan = "free"
+
     config = get_plan_config(plan)
 
     # Transcription is available to all plans that can record; Free has a daily limit.
