@@ -1257,7 +1257,18 @@ def payment_verify():
         }), 400
 
     if paystack_status != "success":
-        payment.status = paystack_status or "failed"
+
+        # Keep payments that are still pending as pending so
+        # they can be verified again after Paystack completes them.
+        if paystack_status in {
+            "pending",
+            "ongoing",
+            "processing",
+        }:
+            payment.status = "pending"
+        else:
+            # Paystack has returned a terminal non-success status.
+            payment.status = paystack_status or "failed"
 
         db.session.commit()
 
