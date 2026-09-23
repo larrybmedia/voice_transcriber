@@ -1,5 +1,4 @@
-﻿import os
-import time
+import os
 import tempfile
 import secrets
 import hashlib
@@ -2230,12 +2229,12 @@ def process_transcription_job(
         )
 
         # ----------------------------------------------------
-        # SPLIT AUDIO INTO 5-MINUTE CHUNKS
+        # SPLIT AUDIO INTO 10-MINUTE CHUNKS
         # ----------------------------------------------------
 
         chunk_pattern = os.path.join(
             chunk_directory,
-            "chunk_%04d.mp3"
+            "chunk_%04d" + file_extension
         )
 
         ffmpeg_command = [
@@ -2246,23 +2245,17 @@ def process_transcription_job(
             "-f",
             "segment",
             "-segment_time",
-            "300",
+            "600",
             "-reset_timestamps",
             "1",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "libmp3lame",
-            "-b:a",
-            "64k",
-chunk_pattern
+            "-c",
+            "copy",
+            chunk_pattern
         ]
 
         print(
             f"[{job_id}] "
-            "Splitting audio into 5-minute chunks..."
+            "Splitting audio into 10-minute chunks..."
         )
 
         result = subprocess.run(
@@ -2288,7 +2281,7 @@ chunk_pattern
                 "error"
             ] = (
                 "Unable to process the audio file. "
-                "Please try again."
+                "Please try again with a shorter recording."
             )
 
             return
@@ -2330,14 +2323,6 @@ chunk_pattern
             "total_chunks"
         ] = total_chunks
 
-        transcription_jobs[job_id][
-            "completed_chunks"
-        ] = 0
-
-        transcription_jobs[job_id][
-            "progress"
-        ] = 0
-
         print(
             f"[{job_id}] "
             f"Created {total_chunks} audio chunks."
@@ -2348,8 +2333,6 @@ chunk_pattern
         # ----------------------------------------------------
 
         transcripts = []
-
-        max_retries = 3
 
         for index, chunk_path in enumerate(
             chunk_files
@@ -2363,172 +2346,93 @@ chunk_pattern
                 f"{chunk_number}/{total_chunks}..."
             )
 
-            chunk_completed = False
+            try:
 
-            for attempt in range(
-                1,
-                max_retries + 1
-            ):
+                with open(
+                    chunk_path,
+                    "rb"
+                ) as chunk_audio:
 
-                try:
-
-                    with open(
-                        chunk_path,
-                        "rb"
-                    ) as chunk_audio:
-
-                        transcription = (
-                            client.audio.transcriptions.create(
-                                file=chunk_audio,
-                                model="whisper-large-v3-turbo",
-                                response_format="json"
-                            )
+                    transcription = (
+                        client.audio.transcriptions.create(
+                            file=chunk_audio,
+                            model="whisper-large-v3-turbo",
+                            response_format="json"
                         )
-
-                    chunk_text = (
-                        transcription.text
-                        or ""
-                    ).strip()
-
-                    if chunk_text:
-
-                        transcripts.append(
-                            chunk_text
-                        )
-
-                    # ------------------------------------------------
-                    # UPDATE PROGRESS
-                    # ------------------------------------------------
-
-                    progress = int(
-                        (
-                            chunk_number
-                            / total_chunks
-                        ) * 100
                     )
 
-                    transcription_jobs[job_id][
-                        "completed_chunks"
-                    ] = chunk_number
+                chunk_text = (
+                    transcription.text
+                    or ""
+                ).strip()
 
-                    transcription_jobs[job_id][
-                        "progress"
-                    ] = progress
+                if chunk_text:
 
-                    print(
-                        f"[{job_id}] "
-                        f"Chunk "
-                        f"{chunk_number}/{total_chunks} "
-                        f"completed "
-                        f"({progress}%)."
+                    transcripts.append(
+                        chunk_text
                     )
 
-                    chunk_completed = True
+                # ------------------------------------------------
+                # UPDATE PROGRESS
+                # ------------------------------------------------
 
-                    break
+                progress = int(
+                    (
+                        chunk_number
+                        / total_chunks
+                    ) * 100
+                )
 
-                except Exception as chunk_error:
+                transcription_jobs[job_id][
+                    "completed_chunks"
+                ] = chunk_number
 
-                    error_text = str(
-                        chunk_error
+                transcription_jobs[job_id][
+                    "progress"
+                ] = progress
+
+                print(
+                    f"[{job_id}] "
+                    f"Chunk "
+                    f"{chunk_number}/{total_chunks} "
+                    f"completed "
+                    f"({progress}%)."
+                )
+
+            except Exception as chunk_error:
+
+                error_text = str(
+                    chunk_error
+                )
+
+                print(
+                    f"[{job_id}] "
+                    f"Chunk "
+                    f"{chunk_number}/{total_chunks} "
+                    "failed:"
+                )
+
+                print(error_text)
+
+                # ------------------------------------------------
+                # GROQ HOURLY LIMIT
+                # ------------------------------------------------
+
+                if (
+                    "rate_limit_exceeded"
+                    in error_text
+                    or "Request too large"
+                    in error_text
+                    or "seconds of audio per hour"
+                    in error_text
+                ):
+
+                    error_message = (
+                        "Groq's hourly transcription "
+                        "limit has been reached. "
+                        "Please try again later or "
+                        "use a shorter recording."
                     )
-
-                    print(
-                        f"[{job_id}] "
-                        f"Chunk "
-                        f"{chunk_number}/{total_chunks} "
-                        f"attempt "
-                        f"{attempt}/{max_retries} "
-                        "failed:"
-                    )
-
-                    print(error_text)
-
-                    # ------------------------------------------------
-                    # TEMPORARY RATE LIMIT / RETRY
-                    # ------------------------------------------------
-
-                    is_rate_limit = (
-                        "rate_limit_exceeded"
-                        in error_text.lower()
-                        or "rate limit"
-                        in error_text.lower()
-                        or "too many requests"
-                        in error_text.lower()
-                        or "429"
-                        in error_text
-                        or "retry-after"
-                        in error_text.lower()
-                    )
-
-                    is_hourly_limit = (
-                        "seconds of audio per hour"
-                        in error_text.lower()
-                        or "audio per hour"
-                        in error_text.lower()
-                    )
-
-                    is_retryable = (
-                        is_rate_limit
-                        or is_hourly_limit
-                        or "timeout"
-                        in error_text.lower()
-                        or "temporarily unavailable"
-                        in error_text.lower()
-                        or "service unavailable"
-                        in error_text.lower()
-                        or "connection"
-                        in error_text.lower()
-                    )
-
-                    if is_retryable and attempt < max_retries:
-
-                        # Progressive backoff:
-                        # 30s, 60s, 120s
-                        retry_seconds = (
-                            30 * (2 ** (attempt - 1))
-                        )
-
-                        print(
-                            f"[{job_id}] "
-                            f"Waiting "
-                            f"{retry_seconds} seconds "
-                            "before retry..."
-                        )
-
-                        time.sleep(
-                            retry_seconds
-                        )
-
-                        continue
-
-                    # ------------------------------------------------
-                    # HOURLY LIMIT AFTER RETRIES
-                    # ------------------------------------------------
-
-                    if is_hourly_limit:
-
-                        error_message = (
-                            "The transcription service "
-                            "has temporarily reached its "
-                            "audio processing allowance. "
-                            "Your recording has not been "
-                            "lost. Please try again later."
-                        )
-
-                        transcription_jobs[job_id][
-                            "status"
-                        ] = "failed"
-
-                        transcription_jobs[job_id][
-                            "error"
-                        ] = error_message
-
-                        return
-
-                    # ------------------------------------------------
-                    # OTHER TRANSCRIPTION ERROR
-                    # ------------------------------------------------
 
                     transcription_jobs[job_id][
                         "status"
@@ -2536,11 +2440,13 @@ chunk_pattern
 
                     transcription_jobs[job_id][
                         "error"
-                    ] = error_text
+                    ] = error_message
 
                     return
 
-            if not chunk_completed:
+                # ------------------------------------------------
+                # OTHER TRANSCRIPTION ERROR
+                # ------------------------------------------------
 
                 transcription_jobs[job_id][
                     "status"
@@ -2548,10 +2454,7 @@ chunk_pattern
 
                 transcription_jobs[job_id][
                     "error"
-                ] = (
-                    f"Chunk {chunk_number} "
-                    "could not be transcribed."
-                )
+                ] = error_text
 
                 return
 
@@ -2599,33 +2502,17 @@ chunk_pattern
             f"{len(final_text)} characters"
         )
 
-        # Record one successful Free-plan transcription
-        # for the daily limit.
+        # Record one successful Free-plan transcription for the daily limit.
         if user_id is not None:
-
             with app.app_context():
-
-                subscription = (
-                    get_active_subscription(
-                        user_id
-                    )
-                )
-
-                if (
-                    subscription
-                    and subscription.plan.lower()
-                    == "free"
-                ):
-
-                    db.session.add(
-                        CreditTransaction(
-                            user_id=user_id,
-                            action="transcription",
-                            credits_used=0,
-                            recording_id=job_id,
-                        )
-                    )
-
+                subscription = get_active_subscription(user_id)
+                if subscription and subscription.plan.lower() == "free":
+                    db.session.add(CreditTransaction(
+                        user_id=user_id,
+                        action="transcription",
+                        credits_used=0,
+                        recording_id=job_id,
+                    ))
                     db.session.commit()
 
     except Exception as e:
@@ -3058,10 +2945,3 @@ if __name__ == "__main__":
         port=5000,
         debug=True
     )
-
-
-
-
-
-
-
