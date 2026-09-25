@@ -3030,6 +3030,300 @@ def transcription_status(job_id):
 
 
 # ============================================================
+# STRUCTURED REPORT GENERATION
+# ============================================================
+
+@app.route(
+    "/api/structured-report",
+    methods=["POST"]
+)
+def structured_report():
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        data = request.get_json(silent=True) or {}
+
+        transcript = (
+            data.get("transcript") or ""
+        ).strip()
+
+        report_type = (
+            data.get("report_type") or ""
+        ).strip().lower()
+
+        if not transcript:
+            return jsonify({
+                "success": False,
+                "error": "Transcript is required.",
+                "code": "transcript_required",
+            }), 400
+
+        allowed_report_types = {
+            "meeting_minutes",
+            "business_report",
+            "lecture_notes",
+            "interview_report",
+            "general_report",
+            "summary_key_points",
+            "action_items",
+        }
+
+        if report_type not in allowed_report_types:
+            return jsonify({
+                "success": False,
+                "error": "Invalid report type.",
+                "code": "invalid_report_type",
+                "allowed_report_types": sorted(
+                    allowed_report_types
+                ),
+            }), 400
+
+        report_instructions = {
+            "meeting_minutes": """
+Create professional meeting minutes.
+
+Use these sections where supported by the transcript:
+1. Meeting Title
+2. Date/Time
+3. Participants
+4. Agenda
+5. Discussion Points
+6. Decisions
+7. Action Items
+8. Next Steps
+9. Conclusion
+
+Do not invent participants, dates, decisions,
+deadlines or other information that is not supported
+by the transcript.
+""",
+
+            "business_report": """
+Create a professional business report based strictly on the transcript.
+
+Use these sections where supported:
+1. Title
+2. Executive Summary
+3. Background
+4. Key Issues
+5. Findings
+6. Discussion
+7. Recommendations
+8. Action Points
+9. Conclusion
+
+STRICT SOURCE-BASED RULES:
+- Use ONLY information explicitly stated in the transcript.
+- Do not invent, infer, assume, or add facts that are not stated.
+- Do not create new recommendations.
+- Under "Recommendations", include only recommendations explicitly made or stated in the transcript.
+- Do not turn your own analysis into a recommendation.
+- Do not create statistics, targets, percentages, deadlines, dates, names, participants, decisions, causes, risks, strategies, or business outcomes that are not stated.
+- Do not create action items that were not stated in the transcript.
+- Do not create owners or responsible persons unless explicitly identified.
+- Do not create deadlines unless explicitly stated.
+- If a section is not supported by the transcript, write "Not specified" rather than filling the gap with assumptions.
+- You may reorganize, summarize, and improve the wording of information that is already in the transcript, but you must preserve its original meaning.
+""",
+
+            "lecture_notes": """
+Convert the transcript into organized lecture/study notes.
+
+Use:
+1. Topic
+2. Main Concepts
+3. Key Points
+4. Explanations
+5. Examples
+6. Important Terms
+7. Summary
+8. Study Points
+
+Preserve important technical terminology.
+Do not invent information that was not discussed.
+""",
+
+            "interview_report": """
+Create an organized interview report.
+
+Use:
+1. Interview Subject
+2. Main Topics
+3. Key Questions
+4. Responses
+5. Important Statements
+6. Key Findings
+7. Summary
+
+Do not invent answers, names or facts.
+""",
+
+            "general_report": """
+Create a clear professional general report based strictly on the transcript.
+
+Use:
+1. Title
+2. Overview
+3. Key Points
+4. Detailed Discussion
+5. Findings
+6. Conclusion
+7. Recommendations
+
+STRICT SOURCE-BASED RULES:
+- Use ONLY information explicitly stated in the transcript.
+- Do not invent, infer, assume, or add facts that are not stated.
+- Do not create new recommendations.
+- Under "Recommendations", include only recommendations explicitly stated in the transcript.
+- Do not turn your own analysis or interpretation into a recommendation.
+- Do not create new conclusions that go beyond the transcript.
+- Do not create statistics, targets, deadlines, dates, names, participants, decisions, causes, risks, strategies, or outcomes that are not stated.
+- Do not create action items that were not stated.
+- If a section is not supported by the transcript, write "Not specified".
+- You may reorganize and summarize information from the transcript, but preserve its original meaning.
+""",
+
+            "summary_key_points": """
+Create a concise summary based strictly on the transcript.
+
+Use:
+1. Summary
+2. Key Points
+3. Important Information
+4. Conclusions
+
+STRICT SOURCE-BASED RULES:
+- Use ONLY information explicitly stated in the transcript.
+- Do not invent, infer, assume, or add facts that are not stated.
+- Do not create new conclusions or opinions.
+- Under "Conclusions", include only conclusions explicitly stated in the transcript.
+- Do not turn your own interpretation into a conclusion.
+- Do not create new recommendations, action items, decisions, causes, outcomes, targets, deadlines, dates, names, or statistics.
+- Preserve names, organisations, locations, numbers, dates, and terminology exactly where provided.
+- You may shorten and reorganize the transcript, but preserve its original meaning.
+- If a section is not supported by the transcript, write "Not specified".
+- Avoid unnecessary repetition.
+""",
+
+            "action_items": """
+Extract actionable tasks from the transcript.
+
+Use a table with:
+- Action Item
+- Responsible Person
+- Deadline
+- Priority
+- Notes
+
+STRICT SOURCE-BASED RULES:
+- Extract ONLY tasks or actions explicitly stated in the transcript.
+- Do not invent, infer, assume, or create new tasks.
+- Do not turn recommendations, observations, discussion points, or general statements into tasks unless the transcript explicitly presents them as actions to be taken.
+- Include a Responsible Person only when explicitly stated or clearly assigned in the transcript.
+- Include a Deadline only when explicitly stated.
+- Include a Priority only when explicitly stated.
+- Do not infer priority from the importance or urgency of an action.
+- Do not create dates, deadlines, names, owners, priorities, or responsibilities.
+- If a responsible person, deadline, or priority is not provided, write "Not specified".
+- Preserve the original meaning of each action.
+- If the transcript contains no actionable tasks, state "No actionable items specified."
+""",
+        }
+
+        system_prompt = """
+You are NabTranscriber Report Assistant.
+
+Your job is to transform an existing speech transcript
+into a professional structured report.
+
+Important rules:
+
+1. Do not fabricate facts.
+2. Do not invent names, dates, participants,
+   decisions, deadlines or quotations.
+3. Preserve the meaning of the original transcript.
+4. Correct obvious transcription formatting problems
+   where the intended meaning is clear.
+5. Preserve Nigerian names, locations, organizations,
+   government agencies, companies and local terminology.
+6. Recognize Nigerian English usage and do not
+   automatically replace Nigerian expressions with
+   American or British alternatives.
+7. If Nigerian English is mixed with Yoruba, Igbo,
+   Hausa, Pidgin or another language, preserve the
+   original meaning and important local terms.
+8. Use clear professional English for the report while
+   preserving important original terminology.
+9. If information is unavailable, use "Not specified"
+   rather than inventing it.
+10. Return only the requested report.
+"""
+
+        user_prompt = f"""
+Report type:
+{report_type}
+
+Instructions:
+{report_instructions[report_type]}
+
+Transcript:
+--------------------
+{transcript}
+--------------------
+"""
+
+        completion = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            temperature=0.2,
+        )
+
+        report = (
+            completion.choices[0].message.content
+            or ""
+        ).strip()
+
+        if not report:
+            return jsonify({
+                "success": False,
+                "error": "The report could not be generated.",
+                "code": "empty_report",
+            }), 500
+
+        return jsonify({
+            "success": True,
+            "report_type": report_type,
+            "report": report,
+        }), 200
+
+    except Exception as e:
+        print("=" * 60)
+        print("STRUCTURED REPORT ERROR")
+        print("=" * 60)
+        print(e)
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Unable to generate the structured report "
+                "at this time."
+            ),
+            "code": "structured_report_error",
+        }), 500
+
+# ============================================================
 # APPLICATION START
 # ============================================================
 
@@ -3058,6 +3352,10 @@ if __name__ == "__main__":
         port=5000,
         debug=True
     )
+
+
+
+
 
 
 
