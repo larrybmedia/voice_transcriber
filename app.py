@@ -1697,6 +1697,14 @@ def forgot_password():
         email=email
     ).first()
 
+    print(
+        "PASSWORD RESET:",
+        "email=", email,
+        "user_found=", bool(user),
+        "user_id=", user.id if user else None,
+        "role=", user.role if user else None
+    )
+
     if not user:
         return jsonify(generic_response), 200
 
