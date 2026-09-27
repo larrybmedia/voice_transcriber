@@ -1924,25 +1924,63 @@ def debug_admin_check():
 
 @app.route("/api/debug/create-admin", methods=["POST"])
 def debug_create_admin():
-    email = "nabtranscriber@gmail.com"
+    setup_key = os.getenv("ADMIN_SETUP_KEY")
+
+    if not setup_key:
+        return jsonify({
+            "success": False,
+            "error": "Admin setup is not configured."
+        }), 503
+
+    provided_key = request.headers.get("X-Admin-Setup-Key")
+
+    if not provided_key or not secrets.compare_digest(
+        provided_key,
+        setup_key
+    ):
+        return jsonify({
+            "success": False,
+            "error": "Unauthorized."
+        }), 401
+
+    data = request.get_json(silent=True) or {}
+
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    if email != "nabtranscriber@gmail.com":
+        return jsonify({
+            "success": False,
+            "error": "Invalid admin email."
+        }), 400
+
+    if len(password) < 8:
+        return jsonify({
+            "success": False,
+            "error": "Password must be at least 8 characters."
+        }), 400
 
     user = User.query.filter_by(email=email).first()
 
     if user:
+        user.role = "admin"
+        user.set_password(password)
+        db.session.commit()
+
         return jsonify({
-            "success": False,
-            "message": "Admin account already exists.",
+            "success": True,
+            "message": "Existing account updated to admin.",
             "user_id": user.id,
             "email": user.email,
             "role": user.role
-        }), 409
+        }), 200
 
     user = User(
         email=email,
         role="admin"
     )
 
-    user.set_password("CHANGE_THIS_TEMPORARY_PASSWORD")
+    user.set_password(password)
 
     db.session.add(user)
     db.session.commit()
