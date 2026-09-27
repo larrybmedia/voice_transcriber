@@ -91,6 +91,7 @@ class User(db.Model):
         return {
             "id": self.id,
             "email": self.email,
+            "role": self.role,
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at
