@@ -1697,14 +1697,6 @@ def forgot_password():
         email=email
     ).first()
 
-    print(
-        "PASSWORD RESET:",
-        "email=", email,
-        "user_found=", bool(user),
-        "user_id=", user.id if user else None,
-        "role=", user.role if user else None
-    )
-
     if not user:
         return jsonify(generic_response), 200
 
@@ -1904,94 +1896,6 @@ def delete_account():
             )
         }), 500
 
-
-@app.route("/api/debug/admin-check", methods=["GET"])
-def debug_admin_check():
-    email = "nabtranscriber@gmail.com"
-
-    user = User.query.filter_by(email=email).first()
-
-    return jsonify({
-        "success": True,
-        "found": bool(user),
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "role": user.role
-        } if user else None
-    }), 200
-
-
-@app.route("/api/debug/create-admin", methods=["POST"])
-def debug_create_admin():
-    setup_key = os.getenv("ADMIN_SETUP_KEY")
-
-    if not setup_key:
-        return jsonify({
-            "success": False,
-            "error": "Admin setup is not configured."
-        }), 503
-
-    provided_key = request.headers.get("X-Admin-Setup-Key")
-
-    if not provided_key or not secrets.compare_digest(
-        provided_key,
-        setup_key
-    ):
-        return jsonify({
-            "success": False,
-            "error": "Unauthorized."
-        }), 401
-
-    data = request.get_json(silent=True) or {}
-
-    email = data.get("email", "").strip().lower()
-    password = data.get("password", "")
-
-    if email != "nabtranscriber@gmail.com":
-        return jsonify({
-            "success": False,
-            "error": "Invalid admin email."
-        }), 400
-
-    if len(password) < 8:
-        return jsonify({
-            "success": False,
-            "error": "Password must be at least 8 characters."
-        }), 400
-
-    user = User.query.filter_by(email=email).first()
-
-    if user:
-        user.role = "admin"
-        user.set_password(password)
-        db.session.commit()
-
-        return jsonify({
-            "success": True,
-            "message": "Existing account updated to admin.",
-            "user_id": user.id,
-            "email": user.email,
-            "role": user.role
-        }), 200
-
-    user = User(
-        email=email,
-        role="admin"
-    )
-
-    user.set_password(password)
-
-    db.session.add(user)
-    db.session.commit()
-
-    return jsonify({
-        "success": True,
-        "message": "Admin account created.",
-        "user_id": user.id,
-        "email": user.email,
-        "role": user.role
-    }), 201
 
 # ============================================================
 # AUTHENTICATION - RESET PASSWORD
