@@ -1905,6 +1905,22 @@ def delete_account():
         }), 500
 
 
+@app.route("/api/debug/admin-check", methods=["GET"])
+def debug_admin_check():
+    email = "nabtranscriber@gmail.com"
+
+    user = User.query.filter_by(email=email).first()
+
+    return jsonify({
+        "success": True,
+        "found": bool(user),
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role
+        } if user else None
+    }), 200
+
 # ============================================================
 # AUTHENTICATION - RESET PASSWORD
 # ============================================================
