@@ -20,14 +20,14 @@ PLAN_CONFIG = {
         "record": True,
         "meeting_record": False,
         "upload": False,
-        "max_recording_minutes": 30,
+        "max_recording_minutes": 15,
         "daily_transcriptions": 2,
     },
 
     "gold": {
-        "monthly": 5000,
-        "6_months": 28000,
-        "yearly": 57000,
+        "monthly": 7000,
+        "6_months": 39000,
+        "yearly": 75000,
         "record": True,
         "meeting_record": False,
         "upload": False,
@@ -36,9 +36,9 @@ PLAN_CONFIG = {
     },
 
     "enterprise": {
-        "monthly": 8500,
-        "6_months": 48000,
-        "yearly": 98000,
+        "monthly": 10000,
+        "6_months": 55000,
+        "yearly": 110000,
         "record": True,
         "meeting_record": True,
         "upload": True,
