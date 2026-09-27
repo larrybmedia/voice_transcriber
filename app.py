@@ -1921,6 +1921,40 @@ def debug_admin_check():
         } if user else None
     }), 200
 
+
+@app.route("/api/debug/create-admin", methods=["POST"])
+def debug_create_admin():
+    email = "nabtranscriber@gmail.com"
+
+    user = User.query.filter_by(email=email).first()
+
+    if user:
+        return jsonify({
+            "success": False,
+            "message": "Admin account already exists.",
+            "user_id": user.id,
+            "email": user.email,
+            "role": user.role
+        }), 409
+
+    user = User(
+        email=email,
+        role="admin"
+    )
+
+    user.set_password("CHANGE_THIS_TEMPORARY_PASSWORD")
+
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "message": "Admin account created.",
+        "user_id": user.id,
+        "email": user.email,
+        "role": user.role
+    }), 201
+
 # ============================================================
 # AUTHENTICATION - RESET PASSWORD
 # ============================================================
