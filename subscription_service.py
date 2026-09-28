@@ -323,30 +323,78 @@ def activate_subscription_from_payment(
     now = datetime.now(timezone.utc)
 
     if billing_cycle == "monthly":
-        end_date = now + timedelta(days=30)
-
+        subscription_period = timedelta(days=30)
     elif billing_cycle == "6_months":
-        end_date = now + timedelta(days=182)
-
+        subscription_period = timedelta(days=182)
     else:
-        end_date = now + timedelta(days=365)
+        subscription_period = timedelta(days=365)
 
-    subscription = get_active_subscription(
-        user_id
-    )
+    subscription = get_active_subscription(user_id)
 
     if subscription:
+        # --------------------------------------------------------
+        # ACTIVE SUBSCRIPTION
+        # --------------------------------------------------------
+        #
+        # If the user is renewing the same plan while it is still
+        # active, preserve the remaining time and add the new
+        # subscription period to the existing expiry date.
+        #
+        # If the user is changing plan, the new plan starts now.
+        # --------------------------------------------------------
+
+        current_plan = subscription.plan.lower()
+
+        if current_plan == plan:
+            subscription.start_date = (
+                subscription.start_date
+                if subscription.start_date
+                else now
+            )
+
+            current_end_date = subscription.end_date
+
+            if current_end_date is None:
+                current_end_date = now
+
+            if current_end_date.tzinfo is None:
+                current_end_date = current_end_date.replace(
+                    tzinfo=timezone.utc
+                )
+
+            subscription.end_date = (
+                current_end_date + subscription_period
+            )
+
+        else:
+            # Plan change/upgrade:
+            # start the new plan from the payment date.
+            subscription.start_date = now
+            subscription.end_date = (
+                now + subscription_period
+            )
+
         subscription.plan = plan
         subscription.billing_cycle = billing_cycle
         subscription.amount = expected_amount
-        subscription.start_date = now
-        subscription.end_date = end_date
         subscription.status = "active"
         subscription.payment_reference = (
             transaction_reference
         )
 
     else:
+        # --------------------------------------------------------
+        # NO ACTIVE SUBSCRIPTION
+        # --------------------------------------------------------
+        #
+        # This covers:
+        # - Free users purchasing for the first time
+        # - Expired subscriptions
+        # - Users whose previous subscription is no longer active
+        # --------------------------------------------------------
+
+        end_date = now + subscription_period
+
         subscription = Subscription(
             user_id=user_id,
             plan=plan,
