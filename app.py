@@ -1532,10 +1532,43 @@ def admin_payments():
         error_out=False
     )
 
-    payments = [
-        payment.to_dict()
-        for payment in pagination.items
-    ]
+    payments = []
+
+    for payment in pagination.items:
+        payment_data = payment.to_dict()
+
+        subscription = None
+
+        if payment.subscription_id:
+            subscription = Subscription.query.get(
+                payment.subscription_id
+            )
+
+        payment_data["payment_date"] = (
+            payment.paid_at.isoformat()
+            if payment.paid_at
+            else None
+        )
+
+        payment_data["subscription_start_date"] = (
+            subscription.start_date.isoformat()
+            if subscription and subscription.start_date
+            else None
+        )
+
+        payment_data["subscription_end_date"] = (
+            subscription.end_date.isoformat()
+            if subscription and subscription.end_date
+            else None
+        )
+
+        payment_data["subscription_status"] = (
+            subscription.status
+            if subscription
+            else None
+        )
+
+        payments.append(payment_data)
 
     return jsonify({
         "success": True,
