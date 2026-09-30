@@ -327,6 +327,95 @@ class Payment(db.Model):
 
 
 # ============================================================
+# TRANSCRIPTION HISTORY
+# ============================================================
+
+class TranscriptionHistory(db.Model):
+    __tablename__ = "transcription_history"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id"),
+        nullable=False,
+        index=True
+    )
+
+    title = db.Column(
+        db.String(255),
+        nullable=False,
+        default="Untitled Transcription"
+    )
+
+    transcript = db.Column(
+        db.Text,
+        nullable=False
+    )
+
+    duration_seconds = db.Column(
+        db.Integer,
+        nullable=True
+    )
+
+    structured_report = db.Column(
+        db.Text,
+        nullable=True
+    )
+
+    structured_report_type = db.Column(
+        db.String(100),
+        nullable=True
+    )
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True
+    )
+
+    expires_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        index=True
+    )
+
+    user = db.relationship(
+        "User",
+        backref=db.backref(
+            "transcription_history",
+            lazy=True,
+            cascade="all, delete-orphan"
+        )
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "transcript": self.transcript,
+            "duration_seconds": self.duration_seconds,
+            "structured_report": self.structured_report,
+            "structured_report_type": self.structured_report_type,
+            "created_at": (
+                self.created_at.isoformat()
+                if self.created_at
+                else None
+            ),
+            "expires_at": (
+                self.expires_at.isoformat()
+                if self.expires_at
+                else None
+            ),
+        }
+
+
+# ============================================================
 # USER CREDITS
 # ============================================================
 

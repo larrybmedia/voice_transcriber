@@ -22,6 +22,7 @@ from models import (
     UserCredit,
     CreditTransaction,
     Payment,
+    TranscriptionHistory,
 )
 
 from subscription_service import (
@@ -3055,6 +3056,351 @@ def transcription_status(job_id):
         "text": job.get("text"),
         "error": job.get("error"),
     }), 200
+
+
+# ============================================================
+# TRANSCRIPTION HISTORY
+# ============================================================
+
+
+def cleanup_expired_transcriptions(user_id=None):
+    """
+    Remove transcription history records that have passed
+    their 30-day retention period.
+
+    If user_id is provided, only that user's records are
+    cleaned up.
+    """
+
+    now = datetime.now(timezone.utc)
+
+    query = TranscriptionHistory.query.filter(
+        TranscriptionHistory.expires_at <= now
+    )
+
+    if user_id is not None:
+        query = query.filter(
+            TranscriptionHistory.user_id == user_id
+        )
+
+    expired_records = query.all()
+
+    for record in expired_records:
+        db.session.delete(record)
+
+    if expired_records:
+        db.session.commit()
+
+    return len(expired_records)
+
+
+@app.route(
+    "/api/transcriptions",
+    methods=["GET"]
+)
+def get_transcriptions():
+    """
+    Return the authenticated user's transcription history.
+
+    Records older than 30 days are removed automatically.
+    The Flutter app can request the latest 10 records or
+    retrieve more using the limit parameter.
+    """
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        cleanup_expired_transcriptions(user.id)
+
+        limit = request.args.get(
+            "limit",
+            10,
+            type=int
+        )
+
+        if limit < 1:
+            limit = 10
+
+        # Prevent unnecessarily large requests.
+        limit = min(limit, 100)
+
+        records = (
+            TranscriptionHistory.query
+            .filter_by(user_id=user.id)
+            .order_by(
+                TranscriptionHistory.created_at.desc()
+            )
+            .limit(limit)
+            .all()
+        )
+
+        return jsonify({
+            "success": True,
+            "transcriptions": [
+                record.to_dict()
+                for record in records
+            ],
+            "count": len(records)
+        }), 200
+
+    except Exception as e:
+
+        db.session.rollback()
+
+        print(
+            "Transcription history GET error:",
+            str(e)
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to load transcription history."
+        }), 500
+
+
+@app.route(
+    "/api/transcriptions",
+    methods=["POST"]
+)
+def create_transcription():
+    """
+    Save a raw transcription to the authenticated user's
+    30-day transcription history.
+    """
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        transcript = (
+            data.get("transcript") or ""
+        ).strip()
+
+        if not transcript:
+            return jsonify({
+                "success": False,
+                "error": "Transcript is required."
+            }), 400
+
+        title = (
+            data.get("title")
+            or "Untitled Transcription"
+        ).strip()
+
+        if not title:
+            title = "Untitled Transcription"
+
+        duration_seconds = data.get(
+            "duration_seconds"
+        )
+
+        if duration_seconds is not None:
+            try:
+                duration_seconds = int(
+                    duration_seconds
+                )
+            except (
+                ValueError,
+                TypeError
+            ):
+                duration_seconds = None
+
+        now = datetime.now(timezone.utc)
+
+        expires_at = now + timedelta(
+            days=30
+        )
+
+        transcription = TranscriptionHistory(
+            user_id=user.id,
+            title=title[:255],
+            transcript=transcript,
+            duration_seconds=duration_seconds,
+            created_at=now,
+            expires_at=expires_at,
+        )
+
+        db.session.add(transcription)
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Transcription saved.",
+            "transcription": (
+                transcription.to_dict()
+            )
+        }), 201
+
+    except Exception as e:
+
+        db.session.rollback()
+
+        print(
+            "Transcription history POST error:",
+            str(e)
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to save transcription."
+        }), 500
+
+
+@app.route(
+    "/api/transcriptions/<int:transcription_id>",
+    methods=["PATCH"]
+)
+def update_transcription(
+    transcription_id
+):
+    """
+    Edit a user's transcription history item.
+    """
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        cleanup_expired_transcriptions(
+            user.id
+        )
+
+        transcription = (
+            TranscriptionHistory.query
+            .filter_by(
+                id=transcription_id,
+                user_id=user.id
+            )
+            .first()
+        )
+
+        if not transcription:
+            return jsonify({
+                "success": False,
+                "error": "Transcription not found."
+            }), 404
+
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        if "title" in data:
+
+            title = (
+                data.get("title") or ""
+            ).strip()
+
+            if title:
+                transcription.title = (
+                    title[:255]
+                )
+
+        if "transcript" in data:
+
+            transcript = (
+                data.get("transcript") or ""
+            ).strip()
+
+            if not transcript:
+                return jsonify({
+                    "success": False,
+                    "error": "Transcript cannot be empty."
+                }), 400
+
+            transcription.transcript = transcript
+
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Transcription updated.",
+            "transcription": (
+                transcription.to_dict()
+            )
+        }), 200
+
+    except Exception as e:
+
+        db.session.rollback()
+
+        print(
+            "Transcription history PATCH error:",
+            str(e)
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to update transcription."
+        }), 500
+
+
+@app.route(
+    "/api/transcriptions/<int:transcription_id>",
+    methods=["DELETE"]
+)
+def delete_transcription(
+    transcription_id
+):
+    """
+    Delete a user's transcription history item.
+    """
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        transcription = (
+            TranscriptionHistory.query
+            .filter_by(
+                id=transcription_id,
+                user_id=user.id
+            )
+            .first()
+        )
+
+        if not transcription:
+            return jsonify({
+                "success": False,
+                "error": "Transcription not found."
+            }), 404
+
+        db.session.delete(
+            transcription
+        )
+
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Transcription deleted."
+        }), 200
+
+    except Exception as e:
+
+        db.session.rollback()
+
+        print(
+            "Transcription history DELETE error:",
+            str(e)
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to delete transcription."
+        }), 500
 
 
 # ============================================================
