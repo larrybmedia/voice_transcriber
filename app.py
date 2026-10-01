@@ -3673,6 +3673,32 @@ def update_transcription(
 
             transcription.transcript = transcript
 
+        if "structured_report" in data:
+
+            structured_report = (
+                data.get("structured_report") or ""
+            ).strip()
+
+            if structured_report:
+                transcription.structured_report = (
+                    structured_report
+                )
+            else:
+                transcription.structured_report = None
+
+        if "structured_report_type" in data:
+
+            structured_report_type = (
+                data.get("structured_report_type") or ""
+            ).strip()
+
+            if structured_report_type:
+                transcription.structured_report_type = (
+                    structured_report_type[:100]
+                )
+            else:
+                transcription.structured_report_type = None
+
         db.session.commit()
 
         return jsonify({
@@ -3682,6 +3708,7 @@ def update_transcription(
                 transcription.to_dict()
             )
         }), 200
+
 
     except Exception as e:
 
