@@ -2169,6 +2169,22 @@ def check_subscription_action():
             "message": "Action authorized.",
             "action": action,
             "plan": plan,
+            "status": subscription.status if subscription else "active",
+            "subscription_start_date": (
+                subscription.start_date.isoformat()
+                if subscription and subscription.start_date
+                else None
+            ),
+            "subscription_end_date": (
+                subscription.end_date.isoformat()
+                if subscription and subscription.end_date
+                else None
+            ),
+            "billing_cycle": (
+                subscription.billing_cycle
+                if subscription
+                else None
+            ),
             "remaining_daily_transcriptions": remaining_daily,
         }), 200
 
@@ -2185,6 +2201,22 @@ def check_subscription_action():
         "message": "Action authorized.",
         "action": action,
         "plan": plan,
+        "status": subscription.status if subscription else "active",
+        "subscription_start_date": (
+            subscription.start_date.isoformat()
+            if subscription and subscription.start_date
+            else None
+        ),
+        "subscription_end_date": (
+            subscription.end_date.isoformat()
+            if subscription and subscription.end_date
+            else None
+        ),
+        "billing_cycle": (
+            subscription.billing_cycle
+            if subscription
+            else None
+        ),
     }), 200
 
 
@@ -2272,6 +2304,9 @@ def process_transcription_job(
             "-y",
             "-i",
             temp_path,
+            "-map",
+            "0:a:0",
+            "-vn",
             "-f",
             "segment",
             "-segment_time",
@@ -2286,7 +2321,7 @@ def process_transcription_job(
             "libmp3lame",
             "-b:a",
             "64k",
-chunk_pattern
+            chunk_pattern,
         ]
 
         print(
@@ -2756,6 +2791,324 @@ def get_audio_duration_seconds(file_path):
     result = subprocess.run(command, capture_output=True, text=True, check=True)
     return float(result.stdout.strip())
 
+
+# ============================================================
+# VIDEO TRANSCRIPTION
+# ============================================================
+
+@app.route(
+    "/api/transcribe-video",
+    methods=["POST"]
+)
+def transcribe_video():
+
+    # --------------------------------------------------------
+    # AUTHENTICATE USER
+    # --------------------------------------------------------
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    # --------------------------------------------------------
+    # CHECK ENTERPRISE SUBSCRIPTION
+    # --------------------------------------------------------
+
+    subscription = get_active_subscription(user.id)
+
+    if not subscription:
+        return jsonify({
+            "success": False,
+            "error": (
+                "Video transcription is available "
+                "on the Enterprise plan only."
+            ),
+            "code": "video_upload_not_allowed",
+        }), 403
+
+    plan = subscription.plan.lower()
+
+    if plan != "enterprise":
+        return jsonify({
+            "success": False,
+            "error": (
+                "Video transcription is available "
+                "on the Enterprise plan only."
+            ),
+            "code": "video_upload_not_allowed",
+        }), 403
+
+    # --------------------------------------------------------
+    # CHECK VIDEO FILE
+    # --------------------------------------------------------
+
+    if "video" not in request.files:
+        return jsonify({
+            "success": False,
+            "error": "No video file provided."
+        }), 400
+
+    video_file = request.files["video"]
+
+    if not video_file.filename:
+        return jsonify({
+            "success": False,
+            "error": "No video filename provided."
+        }), 400
+
+    # --------------------------------------------------------
+    # ALLOWED VIDEO EXTENSIONS
+    # --------------------------------------------------------
+
+    allowed_extensions = {
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".mkv",
+        ".avi",
+        ".m4v",
+    }
+
+    original_filename = (
+        video_file.filename
+        or "video.mp4"
+    )
+
+    _, file_extension = os.path.splitext(
+        original_filename
+    )
+
+    file_extension = file_extension.lower()
+
+    if file_extension not in allowed_extensions:
+        return jsonify({
+            "success": False,
+            "error": (
+                "Unsupported video format. "
+                "Please upload MP4, MOV, WebM, MKV, AVI, or M4V."
+            ),
+            "code": "unsupported_video_format",
+        }), 400
+
+    temp_path = None
+
+    # --------------------------------------------------------
+    # CREATE TRANSCRIPTION JOB
+    # --------------------------------------------------------
+
+    job_id = str(uuid.uuid4())
+
+    transcription_jobs[job_id] = {
+        "status": "processing",
+        "completed_chunks": 0,
+        "total_chunks": 0,
+        "progress": 0,
+        "text": None,
+        "error": None,
+    }
+
+    try:
+
+        # ----------------------------------------------------
+        # SAVE VIDEO TEMPORARILY
+        # ----------------------------------------------------
+
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=file_extension,
+        ) as temp:
+
+            video_file.save(temp.name)
+
+            temp_path = temp.name
+
+        file_size = os.path.getsize(
+            temp_path
+        )
+
+        print(
+            f"[{job_id}] "
+            f"Video received: "
+            f"{file_size} bytes"
+        )
+
+        # ----------------------------------------------------
+        # CHECK VIDEO DURATION
+        # ----------------------------------------------------
+
+        try:
+
+            duration_seconds = (
+                get_audio_duration_seconds(
+                    temp_path
+                )
+            )
+
+        except Exception as duration_error:
+
+            print(
+                f"[{job_id}] "
+                "Could not determine video duration:"
+            )
+
+            print(duration_error)
+
+            if (
+                temp_path
+                and os.path.exists(temp_path)
+            ):
+                os.remove(temp_path)
+
+            transcription_jobs.pop(
+                job_id,
+                None
+            )
+
+            return jsonify({
+                "success": False,
+                "error": (
+                    "Could not read the duration "
+                    "of the uploaded video."
+                ),
+                "code": "video_duration_error",
+            }), 400
+
+        print(
+            f"[{job_id}] "
+            f"Video duration: "
+            f"{duration_seconds:.2f} seconds"
+        )
+
+        # ----------------------------------------------------
+        # CHECK THAT VIDEO HAS AUDIO
+        # ----------------------------------------------------
+
+        audio_check_command = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            temp_path,
+        ]
+
+        audio_check = subprocess.run(
+            audio_check_command,
+            capture_output=True,
+            text=True,
+        )
+
+        if (
+            audio_check.returncode != 0
+            or not audio_check.stdout.strip()
+        ):
+
+            if (
+                temp_path
+                and os.path.exists(temp_path)
+            ):
+                os.remove(temp_path)
+
+            transcription_jobs.pop(
+                job_id,
+                None
+            )
+
+            return jsonify({
+                "success": False,
+                "error": (
+                    "The uploaded video does not "
+                    "contain an audio track."
+                ),
+                "code": "video_has_no_audio",
+            }), 400
+
+        # ----------------------------------------------------
+        # START EXISTING TRANSCRIPTION WORKER
+        # ----------------------------------------------------
+
+        transcription_thread = threading.Thread(
+            target=process_transcription_job,
+            args=(
+                job_id,
+                temp_path,
+                file_extension,
+                user.id,
+            ),
+            daemon=True,
+        )
+
+        transcription_thread.start()
+
+        print(
+            f"[{job_id}] "
+            "Video transcription started."
+        )
+
+        # ----------------------------------------------------
+        # RETURN JOB INFORMATION
+        # ----------------------------------------------------
+
+        return jsonify({
+            "success": True,
+            "job_id": job_id,
+            "status": "processing",
+            "completed_chunks": 0,
+            "total_chunks": 0,
+            "progress": 0,
+            "duration_seconds": duration_seconds,
+            "message": (
+                "Video transcription started successfully."
+            ),
+        }), 202
+
+    except Exception as error:
+
+        print(
+            f"[{job_id}] "
+            "VIDEO TRANSCRIPTION START ERROR:"
+        )
+
+        print(error)
+
+        transcription_jobs[job_id][
+            "status"
+        ] = "failed"
+
+        transcription_jobs[job_id][
+            "error"
+        ] = str(error)
+
+        if (
+            temp_path
+            and os.path.exists(temp_path)
+        ):
+
+            try:
+
+                os.remove(temp_path)
+
+            except Exception as cleanup_error:
+
+                print(
+                    "Could not delete "
+                    "temporary video file:",
+                    cleanup_error
+                )
+
+        return jsonify({
+            "success": False,
+            "error": (
+                "Unable to start video transcription."
+            ),
+            "code": "video_transcription_start_error",
+        }), 500
+    
 
 # ============================================================
 # TRANSCRIPTION
