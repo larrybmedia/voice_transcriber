@@ -4077,6 +4077,151 @@ Transcript:
             "code": "structured_report_error",
         }), 500
 
+
+# ============================================================
+# TRANSCRIPT TRANSLATION
+# ============================================================
+
+@app.route(
+    "/api/translate",
+    methods=["POST"]
+)
+def translate_transcript():
+
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        transcript = (
+            data.get("transcript") or ""
+        ).strip()
+
+        target_language = (
+            data.get("target_language") or ""
+        ).strip()
+
+        if not transcript:
+            return jsonify({
+                "success": False,
+                "error": "Transcript is required."
+            }), 400
+
+        if not target_language:
+            return jsonify({
+                "success": False,
+                "error": "Target language is required."
+            }), 400
+
+        allowed_languages = {
+            "English",
+            "Yoruba",
+            "Igbo",
+            "Hausa",
+            "Nigerian Pidgin",
+            "French",
+            "Spanish",
+            "Portuguese",
+            "Arabic",
+            "German",
+            "Chinese",
+            "Japanese",
+            "Korean",
+        }
+
+        if target_language not in allowed_languages:
+            return jsonify({
+                "success": False,
+                "error": "Unsupported target language."
+            }), 400
+
+        system_prompt = """
+You are the translation engine for NabTranscriber.
+
+Translate the supplied transcript into the requested target language.
+
+STRICT RULES:
+
+1. Translate the meaning accurately.
+2. Do not add information that is not in the transcript.
+3. Do not remove important information.
+4. Preserve the original structure and meaning where practical.
+5. Preserve names of people exactly.
+6. Preserve company names exactly.
+7. Preserve government agencies and acronyms exactly.
+8. Preserve locations such as Abuja, Lagos, Kano, Ibadan,
+   Port Harcourt, etc. unless the target language has a standard
+   translated form that is clearly appropriate.
+9. Preserve numbers, dates, times, amounts and percentages accurately.
+10. Preserve technical terms where translating them would change their meaning.
+11. Preserve Nigerian context and terminology.
+12. For Nigerian Pidgin, use natural Nigerian Pidgin.
+13. For Yoruba, use natural standard Yoruba.
+14. For Igbo, use natural standard Igbo.
+15. For Hausa, use natural standard Hausa.
+16. Do not explain the translation.
+17. Return only the translated transcript.
+"""
+
+        user_prompt = f"""
+Target language: {target_language}
+
+Transcript:
+
+{transcript}
+"""
+
+        completion = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            temperature=0.2,
+        )
+
+        translation = (
+            completion.choices[0]
+            .message
+            .content
+            .strip()
+        )
+
+        if not translation:
+            return jsonify({
+                "success": False,
+                "error": "Translation returned an empty result."
+            }), 500
+
+        return jsonify({
+            "success": True,
+            "target_language": target_language,
+            "translation": translation,
+        }), 200
+
+    except Exception as e:
+
+        print(
+            "Translation error:",
+            str(e)
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to translate transcript."
+        }), 500
+
 # ============================================================
 # APPLICATION START
 # ============================================================
