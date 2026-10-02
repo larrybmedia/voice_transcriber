@@ -3871,7 +3871,14 @@ def generate_structured_report_section(
 ):
     """
     Generate a structured report from one transcript section.
+
+    Automatically retries when Groq returns a 429 TPM rate-limit
+    response. This prevents a temporary rate limit from causing
+    the entire structured report request to fail.
     """
+
+    import time
+    import re
 
     user_prompt = f"""
 Report type:
@@ -3886,32 +3893,81 @@ Transcript section:
 --------------------
 """
 
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            },
-        ],
-        temperature=0.2,
+    max_retries = 8
+
+    for attempt in range(max_retries):
+        try:
+            completion = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt,
+                    },
+                ],
+                temperature=0.2,
+            )
+
+            report = (
+                completion.choices[0].message.content
+                or ""
+            ).strip()
+
+            if not report:
+                raise ValueError(
+                    "The model returned an empty report section."
+                )
+
+            return report
+
+        except Exception as error:
+            error_text = str(error)
+
+            # Groq TPM rate limit
+            if "429" in error_text or "rate_limit_exceeded" in error_text:
+                wait_seconds = 20.0
+
+                # Try to extract Groq's suggested wait time.
+                match = re.search(
+                    r"Please try again in ([0-9.]+)s",
+                    error_text,
+                    re.IGNORECASE,
+                )
+
+                if match:
+                    try:
+                        wait_seconds = float(match.group(1)) + 2.0
+                    except ValueError:
+                        pass
+
+                # Never wait less than 2 seconds.
+                wait_seconds = max(wait_seconds, 2.0)
+
+                # Add a small increase on later retries.
+                wait_seconds += attempt * 2
+
+                print(
+                    "STRUCTURED REPORT RATE LIMIT:",
+                    f"attempt {attempt + 1}/{max_retries}",
+                    f"waiting {wait_seconds:.1f}s before retry",
+                )
+
+                if attempt == max_retries - 1:
+                    raise
+
+                time.sleep(wait_seconds)
+                continue
+
+            # Any non-rate-limit error should behave as before.
+            raise
+
+    raise RuntimeError(
+        "Unable to generate structured report section after retries."
     )
-
-    report = (
-        completion.choices[0].message.content
-        or ""
-    ).strip()
-
-    if not report:
-        raise ValueError(
-            "The model returned an empty report section."
-        )
-
-    return report
 
 
 @app.route(
