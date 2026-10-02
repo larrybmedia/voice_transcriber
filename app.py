@@ -3813,7 +3813,7 @@ def delete_transcription(
 # STRUCTURED REPORT GENERATION
 # ============================================================
 
-def split_transcript_for_report(transcript, max_chars=10000):
+def split_transcript_for_report(transcript, max_chars=5000):
     """
     Split a long transcript into manageable sections.
 
@@ -4146,7 +4146,7 @@ Important rules:
 
         chunks = split_transcript_for_report(
             transcript,
-            max_chars=10000,
+            max_chars=5000,
         )
 
         print(
@@ -4421,6 +4421,8 @@ if __name__ == "__main__":
         port=5000,
         debug=True
     )
+
+
 
 
 
