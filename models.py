@@ -371,6 +371,16 @@ class TranscriptionHistory(db.Model):
         nullable=True
     )
 
+    translated_transcript = db.Column(
+        db.Text,
+        nullable=True
+    )
+
+    translation_language = db.Column(
+        db.String(100),
+        nullable=True
+    )
+
     created_at = db.Column(
         db.DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -402,6 +412,8 @@ class TranscriptionHistory(db.Model):
             "duration_seconds": self.duration_seconds,
             "structured_report": self.structured_report,
             "structured_report_type": self.structured_report_type,
+            "translated_transcript": self.translated_transcript,
+            "translation_language": self.translation_language,
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at

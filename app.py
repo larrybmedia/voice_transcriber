@@ -3699,6 +3699,32 @@ def update_transcription(
             else:
                 transcription.structured_report_type = None
 
+        if "translated_transcript" in data:
+
+            translated_transcript = (
+                data.get("translated_transcript") or ""
+            ).strip()
+
+            if translated_transcript:
+                transcription.translated_transcript = (
+                    translated_transcript
+                )
+            else:
+                transcription.translated_transcript = None
+
+        if "translation_language" in data:
+
+            translation_language = (
+                data.get("translation_language") or ""
+            ).strip()
+
+            if translation_language:
+                transcription.translation_language = (
+                    translation_language[:100]
+                )
+            else:
+                transcription.translation_language = None
+
         db.session.commit()
 
         return jsonify({
@@ -3787,11 +3813,113 @@ def delete_transcription(
 # STRUCTURED REPORT GENERATION
 # ============================================================
 
+def split_transcript_for_report(transcript, max_chars=20000):
+    """
+    Split a long transcript into manageable sections.
+
+    Splitting prefers paragraph, line, sentence and word
+    boundaries so that content is not unnecessarily broken.
+    """
+    transcript = (transcript or "").strip()
+
+    if not transcript:
+        return []
+
+    if len(transcript) <= max_chars:
+        return [transcript]
+
+    chunks = []
+    remaining = transcript
+
+    while len(remaining) > max_chars:
+
+        split_at = remaining.rfind("\n\n", 0, max_chars)
+
+        if split_at < max_chars * 0.50:
+            split_at = remaining.rfind("\n", 0, max_chars)
+
+        if split_at < max_chars * 0.50:
+            split_at = remaining.rfind(". ", 0, max_chars)
+
+            if split_at != -1:
+                split_at += 1
+
+        if split_at < max_chars * 0.50:
+            split_at = remaining.rfind(" ", 0, max_chars)
+
+        if split_at <= 0:
+            split_at = max_chars
+
+        chunk = remaining[:split_at].strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+
+    return chunks
+
+
+def generate_structured_report_section(
+    system_prompt,
+    report_type,
+    report_instructions,
+    transcript_section,
+):
+    """
+    Generate a structured report from one transcript section.
+    """
+
+    user_prompt = f"""
+Report type:
+{report_type}
+
+Instructions:
+{report_instructions}
+
+Transcript section:
+--------------------
+{transcript_section}
+--------------------
+"""
+
+    completion = client.chat.completions.create(
+        model="openai/gpt-oss-120b",
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ],
+        temperature=0.2,
+    )
+
+    report = (
+        completion.choices[0].message.content
+        or ""
+    ).strip()
+
+    if not report:
+        raise ValueError(
+            "The model returned an empty report section."
+        )
+
+    return report
+
+
 @app.route(
     "/api/structured-report",
     methods=["POST"]
 )
 def structured_report():
+
     user, auth_error = get_authenticated_user()
 
     if auth_error:
@@ -4016,38 +4144,127 @@ Important rules:
 10. Return only the requested report.
 """
 
-        user_prompt = f"""
+        chunks = split_transcript_for_report(
+            transcript,
+            max_chars=20000,
+        )
+
+        print(
+            "STRUCTURED REPORT:",
+            f"{len(transcript):,} characters,",
+            f"{len(chunks)} section(s)"
+        )
+
+        # Normal/small transcript
+        if len(chunks) == 1:
+
+            report = generate_structured_report_section(
+                system_prompt=system_prompt,
+                report_type=report_type,
+                report_instructions=report_instructions[
+                    report_type
+                ],
+                transcript_section=chunks[0],
+            )
+
+        # Long transcript
+        else:
+
+            section_reports = []
+
+            for index, chunk in enumerate(
+                chunks,
+                start=1
+            ):
+
+                print(
+                    "STRUCTURED REPORT SECTION:",
+                    f"{index}/{len(chunks)}"
+                )
+
+                section_report = (
+                    generate_structured_report_section(
+                        system_prompt=system_prompt,
+                        report_type=report_type,
+                        report_instructions=(
+                            report_instructions[
+                                report_type
+                            ]
+                        ),
+                        transcript_section=chunk,
+                    )
+                )
+
+                section_reports.append(
+                    f"""
+SOURCE SECTION {index}
+====================
+{section_report}
+"""
+                )
+
+            combined_sections = "\n".join(
+                section_reports
+            )
+
+            consolidation_prompt = f"""
 Report type:
 {report_type}
 
 Instructions:
 {report_instructions[report_type]}
 
-Transcript:
---------------------
-{transcript}
---------------------
+The transcript was divided into multiple source
+sections and each section was processed separately.
+
+Below are the resulting section reports.
+
+Your task is to consolidate them into ONE coherent,
+professional final report.
+
+STRICT RULES:
+
+- Use ONLY information contained in the section reports.
+- Do not invent facts.
+- Do not add information that is not present.
+- Preserve names, organisations, locations, numbers,
+  dates and terminology.
+- Remove unnecessary repetition.
+- Combine related points where appropriate.
+- Do not create new recommendations, decisions,
+  action items, conclusions or findings.
+- If information is unavailable, write "Not specified".
+- Preserve the original meaning.
+- Return ONLY the final report.
+
+Section reports:
+================
+
+{combined_sections}
 """
 
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
-            temperature=0.2,
-        )
+            final_completion = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": consolidation_prompt,
+                    },
+                ],
+                temperature=0.2,
+            )
 
-        report = (
-            completion.choices[0].message.content
-            or ""
-        ).strip()
+            report = (
+                final_completion
+                .choices[0]
+                .message
+                .content
+                or ""
+            ).strip()
 
         if not report:
             return jsonify({
@@ -4063,6 +4280,7 @@ Transcript:
         }), 200
 
     except Exception as e:
+
         print("=" * 60)
         print("STRUCTURED REPORT ERROR")
         print("=" * 60)
@@ -4076,7 +4294,6 @@ Transcript:
             ),
             "code": "structured_report_error",
         }), 500
-
 
 # ============================================================
 # TRANSCRIPT TRANSLATION
@@ -4251,6 +4468,9 @@ if __name__ == "__main__":
         port=5000,
         debug=True
     )
+
+
+
 
 
 
