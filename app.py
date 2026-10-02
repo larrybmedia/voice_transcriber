@@ -2413,6 +2413,8 @@ def process_transcription_job(
 
         transcripts = []
 
+        detected_languages = []
+
         max_retries = 3
 
         for index, chunk_path in enumerate(
@@ -2447,6 +2449,24 @@ def process_transcription_job(
                                 model="whisper-large-v3-turbo",
                                 response_format="json"
                             )
+                        )
+
+                    chunk_language = getattr(
+                        transcription,
+                        "language",
+                        None
+                    )
+
+                    if chunk_language:
+                        detected_languages.append(
+                            str(chunk_language).strip().lower()
+                        )
+
+                        print(
+                            f"[{job_id}] "
+                            f"Detected language for chunk "
+                            f"{chunk_number}: "
+                            f"{chunk_language}"
                         )
 
                     chunk_text = (
@@ -2627,6 +2647,15 @@ def process_transcription_job(
             transcripts
         )
 
+        detected_language = None
+
+        if detected_languages:
+            from collections import Counter
+
+            detected_language = Counter(
+                detected_languages
+            ).most_common(1)[0][0]
+
         # ----------------------------------------------------
         # MARK JOB AS COMPLETED
         # ----------------------------------------------------
@@ -2646,6 +2675,10 @@ def process_transcription_job(
         transcription_jobs[job_id][
             "text"
         ] = final_text
+
+        transcription_jobs[job_id][
+            "detected_language"
+        ] = detected_language
 
         print(
             f"[{job_id}] "
@@ -2905,6 +2938,7 @@ def transcribe_video():
         "total_chunks": 0,
         "progress": 0,
         "text": None,
+        "detected_language": None,
         "error": None,
     }
 
@@ -3407,6 +3441,7 @@ def transcription_status(job_id):
         "total_chunks": job.get("total_chunks", 0),
         "progress": job.get("progress", 0),
         "text": job.get("text"),
+        "detected_language": job.get("detected_language"),
         "error": job.get("error"),
     }), 200
 
