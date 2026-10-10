@@ -111,6 +111,7 @@ CORS(
     resources={
         r"/api/*": {
             "origins": [
+                "https://nabtranscriber.com.ng",
                 "https://voice-transcribe-11.web.app",
                 "https://voice-transcribe-11.firebaseapp.com",
                 "https://nabtranscriber-admin.web.app",
