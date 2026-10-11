@@ -1,4 +1,5 @@
 ﻿import os
+import httpx
 import time
 import tempfile
 import secrets
@@ -10,7 +11,7 @@ import uuid
 import hmac
 import hashlib
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
 from groq import Groq
@@ -4484,6 +4485,115 @@ Transcript:
             "error": "Unable to translate transcript."
         }), 500
 
+
+# ============================================================
+# TRANSLATION TEXT-TO-SPEECH (LANGA)
+# ============================================================
+
+@app.route("/api/translate/speech", methods=["POST"])
+def translate_speech():
+    user, auth_error = get_authenticated_user()
+
+    if auth_error:
+        return auth_error
+
+    api_key = os.getenv("LANGA_API_KEY")
+    if not api_key:
+        app.logger.error("LANGA_API_KEY is not configured.")
+        return jsonify({
+            "success": False,
+            "error": "Speech service is not configured."
+        }), 503
+
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    language = (data.get("language") or "").strip().lower()
+
+    voice_codes = {
+        "yoruba": "yo",
+        "yo": "yo",
+        "hausa": "ha",
+        "ha": "ha",
+        "igbo": "ig",
+        "ig": "ig",
+    }
+
+    voice = voice_codes.get(language)
+
+    if not text:
+        return jsonify({
+            "success": False,
+            "error": "Text is required."
+        }), 400
+
+    if len(text) > 5000:
+        return jsonify({
+            "success": False,
+            "error": "Text exceeds the 5000-character limit."
+        }), 400
+
+    if not voice:
+        return jsonify({
+            "success": False,
+            "error": "Supported speech languages are Yoruba, Hausa and Igbo."
+        }), 400
+
+    try:
+        response = httpx.post(
+            "https://langa.julimer.com/v1/audio/speech",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "n-atlas-tts",
+                "input": text,
+                "voice": voice,
+                "response_format": "mp3",
+            },
+            timeout=60.0,
+        )
+
+        if response.status_code != 200:
+            app.logger.warning(
+                "Langa speech request failed with status %s.",
+                response.status_code,
+            )
+            return jsonify({
+                "success": False,
+                "error": "Unable to generate speech. Please try again."
+            }), 502
+
+        if not response.content:
+            return jsonify({
+                "success": False,
+                "error": "Speech service returned empty audio."
+            }), 502
+
+        return Response(
+            response.content,
+            status=200,
+            mimetype="audio/mpeg",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    except httpx.TimeoutException:
+        return jsonify({
+            "success": False,
+            "error": "Speech generation timed out. Please try again."
+        }), 504
+
+    except httpx.RequestError:
+        app.logger.exception("Unable to reach Langa speech service.")
+        return jsonify({
+            "success": False,
+            "error": "Speech service is temporarily unavailable."
+        }), 502
+
+
 # ============================================================
 # APPLICATION START
 # ============================================================
@@ -4510,24 +4620,6 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=5000,
-        debug=True
+        port=int(os.getenv("PORT", "5001")),
+        debug=os.getenv("FLASK_DEBUG", "false").lower() == "true"
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
