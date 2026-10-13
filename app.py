@@ -3900,6 +3900,7 @@ def split_transcript_for_report(transcript, max_chars=5000):
     return chunks
 
 
+
 def generate_structured_report_section(
     system_prompt,
     report_type,
@@ -3907,13 +3908,11 @@ def generate_structured_report_section(
     transcript_section,
 ):
     """
-    Generate a structured report from one transcript section.
+    Generate one structured report section from a transcript.
 
-    Automatically retries when Groq returns a 429 TPM rate-limit
-    response. This prevents a temporary rate limit from causing
-    the entire structured report request to fail.
+    Retries Groq rate-limit errors and performs a targeted
+    accuracy check for General Reports.
     """
-
     import time
     import re
 
@@ -3923,6 +3922,15 @@ Report type:
 
 Instructions:
 {report_instructions}
+
+Additional source-accuracy requirements:
+- Treat the transcript as the only evidence for factual claims.
+- A request or instruction is not proof of agreement or commitment.
+- Do not invent recommendations, deadlines, mechanisms,
+  decisions, or follow-up meetings.
+- Do not describe an inferred objective as an official objective.
+- If a detail is not supported by the transcript, say so.
+- Follow the required report headings exactly.
 
 Transcript section:
 --------------------
@@ -3950,8 +3958,7 @@ Transcript section:
             )
 
             report = (
-                completion.choices[0].message.content
-                or ""
+                completion.choices[0].message.content or ""
             ).strip()
 
             if not report:
@@ -3959,16 +3966,78 @@ Transcript section:
                     "The model returned an empty report section."
                 )
 
+            # Targeted check for unsupported claims in General Reports.
+            if report_type == "general_report":
+                unsupported_patterns = [
+                    r"implicit commitment",
+                    r"implicit agreement",
+                    r"key recommendation derived from the discussion",
+                    r"establish a clear deadline",
+                    r"establishing a clear deadline",
+                ]
+
+                if any(
+                    re.search(pattern, report, re.IGNORECASE)
+                    for pattern in unsupported_patterns
+                ):
+                    correction_prompt = f"""
+Review the report below against the source transcript.
+
+Remove unsupported recommendations, invented deadlines,
+unconfirmed agreements, and implied commitments.
+
+A request from a chair must not be described as an agreement
+or commitment unless the source explicitly confirms acceptance.
+
+Do not add new facts. Keep the existing report structure and
+all required headings. Preserve every source-supported fact.
+
+SOURCE TRANSCRIPT:
+{transcript_section}
+
+REPORT TO CORRECT:
+{report}
+
+Return only the corrected report.
+"""
+
+                    correction = client.chat.completions.create(
+                        model="openai/gpt-oss-120b",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a strict factual editor. "
+                                    "Use only the supplied source. "
+                                    "Do not invent or infer facts."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": correction_prompt,
+                            },
+                        ],
+                        temperature=0.0,
+                    )
+
+                    corrected_report = (
+                        correction.choices[0].message.content or ""
+                    ).strip()
+
+                    if corrected_report:
+                        report = corrected_report
+
             return report
 
         except Exception as error:
             error_text = str(error)
 
-            # Groq TPM rate limit
-            if "429" in error_text or "rate_limit_exceeded" in error_text:
+            if (
+                "429" in error_text
+                or "rate_limit_exceeded" in error_text
+            ):
                 wait_seconds = 20.0
 
-                # Try to extract Groq's suggested wait time.
                 match = re.search(
                     r"Please try again in ([0-9.]+)s",
                     error_text,
@@ -3981,10 +4050,7 @@ Transcript section:
                     except ValueError:
                         pass
 
-                # Never wait less than 2 seconds.
                 wait_seconds = max(wait_seconds, 2.0)
-
-                # Add a small increase on later retries.
                 wait_seconds += attempt * 2
 
                 print(
@@ -3999,12 +4065,12 @@ Transcript section:
                 time.sleep(wait_seconds)
                 continue
 
-            # Any non-rate-limit error should behave as before.
             raise
 
     raise RuntimeError(
         "Unable to generate structured report section after retries."
     )
+
 
 
 @app.route(
@@ -4074,6 +4140,161 @@ Use these sections where supported by the transcript:
 Do not invent participants, dates, decisions,
 deadlines or other information that is not supported
 by the transcript.
+
+ADDITIONAL PROFESSIONAL MEETING MINUTES REQUIREMENTS
+
+PURPOSE AND STANDARD
+
+Prepare formal, comprehensive and factual Minutes of Meeting (MoM) suitable for official government, corporate, institutional or organisational records.
+
+Minutes must accurately document the meeting's proceedings, material contributions, confirmed decisions, assigned responsibilities and follow-up actions. They must be concise enough to avoid reproducing the entire transcript, but detailed enough to preserve all material discussions and resolutions.
+
+Use the following 13 numbered headings in the specified order. Reproduce each heading exactly and include each section once.
+
+1. MEETING DETAILS
+
+Include the organisation, meeting title or purpose, day and date, start and end times, venue or online platform, chairperson, secretary or minute-taker, and other supplied meeting details.
+
+Do not assume that the recording date is the meeting date. Mark unavailable details as "Not specified in the source material."
+
+2. ATTENDANCE
+
+Provide a table with these columns:
+
+- S/N
+- Name
+- Designation/Department
+- Organisation
+- Status
+
+Record attendees, apologies, invitees and observers only where the source identifies them. Do not invent names, designations, departments, organisations or attendance status. Do not assume that a speaker list represents the complete attendance register.
+
+3. AGENDA OF THE MEETING
+
+List agenda items in the order they were considered, where the source establishes that order. Distinguish a formally stated agenda from topics that merely arose during the discussion.
+
+Do not invent routine agenda items such as opening prayer, adoption of previous minutes, AOB or closing remarks simply because they commonly appear in meetings.
+
+4. OPENING REMARKS
+
+Identify the person who opened the meeting and summarise the recorded remarks accurately. Do not invent welcoming statements, instructions, themes or expectations.
+
+If opening remarks were not captured, state that they were not specified in the source material.
+
+5. CONFIRMATION OF PREVIOUS MINUTES
+
+Record whether previous minutes were presented, reviewed, corrected, proposed for adoption, seconded or formally adopted, but only where the source supports each detail.
+
+Do not claim that minutes were adopted as a true record without explicit evidence. If this item was not discussed or the relevant information is unavailable, state that accurately.
+
+6. MATTERS ARISING FROM THE PREVIOUS MEETING
+
+Document previous decisions or action points and their recorded progress, responsible persons or units, and status.
+
+Do not classify an item as completed, ongoing, delayed or pending unless the source supports that status. Do not invent previous decisions or action items when previous minutes are unavailable.
+
+7. PROCEEDINGS AND DISCUSSIONS
+
+Organise the substantive proceedings under separate agenda-item or topic subheadings.
+
+For each item, document where available:
+
+- Issue or subject considered.
+- Material contributions, including names and designations where supplied.
+- Important clarifications, questions and responses.
+- Evidence, figures, dates and technical details.
+- Proposals and recommendations.
+- Confirmed decisions or resolutions.
+- Actions expressly assigned by the meeting.
+
+Attribute contributions accurately. Do not attribute a collective position to all members when only one person expressed it. Preserve disagreements and unresolved issues where material.
+
+Distinguish discussion from agreement. Do not reproduce every word of the transcript or add generic commentary.
+
+8. DECISIONS AND RESOLUTIONS
+
+Provide a separate numbered list of formal decisions and resolutions explicitly supported by the source.
+
+For each decision, record the decision or resolution, the responsible person or unit if assigned, and any stated conditions or deadlines.
+
+Separate approved decisions from proposals, recommendations, matters deferred for consideration and issues requiring further consultation.
+
+If no formal decisions were recorded, state: "No formal decisions or resolutions were specified in the source material."
+
+9. ACTION POINTS
+
+Provide a table with these columns:
+
+- S/N
+- Action Point
+- Responsible Officer/Unit
+- Deadline
+- Status
+
+Include only actions that were expressly assigned, directed or agreed upon in the source. Distinguish a formal assignment from a proposal that remains unapproved.
+
+Do not invent action owners, deadlines, deliverables, targets or status updates. If an action is recorded but its owner or deadline is missing, use "Not specified in the source material."
+
+Do not turn every discussion topic, suggestion or recommendation into an action point.
+
+If no actionable assignments were recorded, state that no specific action points were identified in the source material.
+
+10. ANY OTHER BUSINESS (AOB)
+
+Record additional matters raised outside the principal agenda only when the source identifies them as such or clearly establishes that they were additional business.
+
+Capture any related decisions or actions accurately. Do not invent an AOB discussion merely to complete the template.
+
+11. DATE OF THE NEXT MEETING
+
+Record the next meeting's date, time, venue or platform only where stated or confirmed.
+
+Distinguish a confirmed meeting arrangement from a suggestion to meet again. If the source does not establish a date, state: "Not specified in the source material."
+
+12. CLOSING REMARKS AND ADJOURNMENT
+
+Record the person who delivered closing remarks and the actual adjournment time only when the source supports those details.
+
+Do not infer that the meeting formally closed or that closing remarks were delivered merely because the recording ended.
+
+13. APPROVAL AND AUTHENTICATION
+
+Provide clearly labelled fields for completion where appropriate:
+
+Prepared by:
+Name:
+Designation:
+Signature:
+Date:
+
+Reviewed/Approved by:
+Name:
+Designation:
+Signature:
+Date:
+
+Use supplied details where available. Otherwise, leave the fields clearly marked "To be completed" rather than inventing names, signatures, approval dates or confirmation of approval.
+
+STRICT MINUTES ACCURACY RULES
+
+- Use the transcript as the primary source of evidence and any additional meeting details explicitly supplied as input.
+- Never invent names, designations, attendance, agenda items, dates, times, venues, questions, responses, decisions, resolutions, commitments, action owners or deadlines.
+- A request or instruction does not establish acceptance, agreement or commitment by the people receiving it.
+- Do not describe a proposal as approved, a discussion as a resolution, or a recommendation as an assigned action.
+- Do not claim that a previous meeting's minutes were adopted unless the source explicitly records adoption.
+- Do not assume that silence, lack of objection or the presence of participants establishes consensus.
+- Preserve differing views and unresolved matters without inventing a conclusion.
+- Correct obvious transcription errors only where the intended meaning is clear.
+- Preserve Nigerian names, government institutions, designations and local terminology accurately.
+- If a section was not discussed, state that it was not recorded or was not discussed, as appropriate.
+- If information is missing, use "Not specified in the source material" rather than guessing.
+- Do not use "To be determined" to imply that the meeting agreed to determine something later unless the source supports that intention.
+- Use neutral, professional English suitable for official records.
+- Avoid repetition and generic filler.
+- Ensure the decisions and action tracker agree with the proceedings.
+- Return one complete set of minutes with all 13 headings exactly once and in the correct order.
+- Before returning the minutes, verify all material statements against the source and remove unsupported claims or contradictions.
+- Return only the completed minutes, without drafting notes or explanations of these instructions.
 """,
 
             "business_report": """
@@ -4102,6 +4323,102 @@ STRICT SOURCE-BASED RULES:
 - Do not create deadlines unless explicitly stated.
 - If a section is not supported by the transcript, write "Not specified" rather than filling the gap with assumptions.
 - You may reorganize, summarize, and improve the wording of information that is already in the transcript, but you must preserve its original meaning.
+
+ADDITIONAL PROFESSIONAL BUSINESS REPORT REQUIREMENTS
+
+REPORTING STANDARD
+
+- Prepare a formal, well-organised business report suitable for Management, executives, departmental heads and other authorised organisational readers.
+- Retain the existing nine-section structure and use the section headings in the prescribed order.
+- Use clear, professional business English, concise paragraphs, informative subheadings and tables where they improve readability.
+- The level of detail must reflect the actual information available. Do not pad a short transcript or omit important source-supported details from a substantive transcript.
+- Do not convert a transcript of a meeting, interview, presentation or informal discussion into a formal business decision-making record unless the source supports that interpretation.
+
+1. TITLE
+
+- Use an official report title only when it is supplied or clearly stated in the transcript.
+- Include the organisation, department, reporting period, report date and author only where those details are provided.
+- Do not invent a report title, company name, reporting officer or reporting period.
+- Where the title is unavailable, use "Business Report" without implying that an official title was supplied.
+
+2. EXECUTIVE SUMMARY
+
+- Summarise the principal business issues, documented findings, explicit recommendations and confirmed outcomes contained in the report.
+- Ensure every statement in the executive summary is supported by the detailed sections.
+- Do not introduce new findings, decisions, recommendations, financial claims or outcomes in the summary.
+- Distinguish reported results from proposals and anticipated outcomes.
+
+3. BACKGROUND
+
+- Present the business context, purpose, scope and relevant history only where the transcript provides that information.
+- Do not invent the organisation's strategy, market position, business model, institutional mandate, industry conditions or reasons for a business problem.
+- Do not use external knowledge to complete missing background information.
+
+4. KEY ISSUES
+
+- Identify the material business issues, concerns, questions or topics explicitly raised in the transcript.
+- Distinguish confirmed problems from concerns, opinions, questions and unverified allegations.
+- Do not infer causes, severity, financial exposure, urgency or organisational impact unless the source supports those claims.
+- Where multiple issues are recorded, organise them clearly without changing their meaning or importance.
+
+5. FINDINGS
+
+- Record findings, observations, results and evidence explicitly reported in the source.
+- Preserve stated figures, financial amounts, percentages, dates, targets and units accurately.
+- Do not calculate or extrapolate additional business results unless the calculation is directly supported by the supplied data and is clearly labelled.
+- Do not describe an opinion, prediction or proposal as an established finding.
+- Where the transcript reports no measurable results, do not manufacture performance indicators or conclusions.
+
+6. DISCUSSION
+
+- Present the material arguments, explanations, viewpoints and clarifications recorded in the transcript.
+- Attribute important statements to the correct speaker or organisation where identified.
+- Preserve material differences of opinion and unresolved questions.
+- Do not introduce external business theories, market analysis, management frameworks or explanations that were not supplied in the source.
+- Do not imply consensus where the transcript records only individual views or an ongoing discussion.
+
+7. RECOMMENDATIONS
+
+- Include only recommendations explicitly made or stated in the transcript.
+- Preserve the original meaning and intended scope of each recommendation.
+- Identify the person or organisation making a recommendation only where the source establishes that identity.
+- Distinguish recommendations from proposals, observations, questions, instructions and confirmed decisions.
+- Do not generate additional recommendations based on the model's own analysis, professional knowledge or assumptions.
+- Do not invent priorities, cost estimates, projected benefits, implementation methods, targets or timelines.
+- If no recommendations were explicitly recorded, write "Not specified."
+
+8. ACTION POINTS
+
+- Include only actions explicitly assigned, directed or agreed upon in the transcript.
+- Where supported, use a table with these columns:
+  S/N; Action Point; Responsible Person/Unit; Deadline; Status.
+- Do not treat a recommendation or suggested next step as an assigned action unless the source establishes that status.
+- Do not invent action owners, departments, deadlines, budgets, performance targets or completion status.
+- Preserve distinctions between proposed actions, formally agreed actions and instructions issued by an identified authority.
+- Where an action is stated but its owner or deadline is absent, use "Not specified" for the missing field.
+- If no action points were explicitly recorded, write "Not specified."
+
+9. CONCLUSION
+
+- Summarise the main source-supported issues, findings, recommendations and outcomes already documented in the report.
+- Do not introduce new conclusions, causal explanations, decisions, commitments or recommendations.
+- Do not describe the business activity as successful, unsuccessful, profitable, effective or completed unless the transcript explicitly supports that assessment.
+- If the source contains unresolved matters, preserve their unresolved status.
+
+SOURCE CONSISTENCY AND QUALITY CONTROL
+
+- Use the transcript as the primary source and any additional information explicitly supplied as input.
+- Preserve the original meaning while correcting grammar and obvious transcription errors where the intended meaning is clear.
+- Do not invent company names, staff details, customer information, financial amounts, contracts, market data, business risks, strategies, causes, decisions or outcomes.
+- Do not treat an expectation, forecast or proposed result as an actual achievement.
+- Do not turn a request into an agreement or a discussion into a decision.
+- If source statements conflict, retain the distinction and identify the inconsistency where material rather than choosing a version without evidence.
+- If the transcript is incomplete, report only the available information and do not imply that the record is comprehensive.
+- Use "Not specified" for unsupported sections or missing information, consistently with the existing instructions.
+- Keep the report internally consistent. The executive summary, findings, recommendations, action points and conclusion must not contradict one another.
+- Use each of the nine sections once, in the prescribed order. Avoid duplicated sections, repeated paragraphs and generic filler.
+- Before returning the report, check that every material factual statement is traceable to the source and remove unsupported claims.
+- Return only the completed business report, without drafting notes or explanations of these instructions.
 """,
 
             "lecture_notes": """
@@ -4119,6 +4436,88 @@ Use:
 
 Preserve important technical terminology.
 Do not invent information that was not discussed.
+
+ADDITIONAL PROFESSIONAL LECTURE NOTES REQUIREMENTS
+
+PURPOSE AND STRUCTURE
+
+- Produce clear, organised and useful lecture or study notes based strictly on the supplied transcript.
+- Retain the existing eight-section structure and present the sections in the prescribed order.
+- Use informative subheadings, numbered lists, bullet points and tables where they improve understanding.
+- Organise the material logically without changing the lecturer's intended meaning.
+- Provide enough detail to support revision and learning, but do not repeat the same information unnecessarily.
+- Do not turn a short transcript into a lengthy textbook chapter or add material that was not covered.
+
+1. TOPIC
+
+- Use the lecture title, subject or topic only when stated or clearly identified in the transcript.
+- If no topic is identified, write "Not specified."
+- Do not invent a course title, lecturer's name, institution, date, department or academic level.
+
+2. MAIN CONCEPTS
+
+- Identify the principal concepts and themes explicitly discussed.
+- Arrange related concepts into meaningful groups.
+- Explain relationships between concepts only where supported by the transcript.
+- Do not introduce additional theories, frameworks or subject areas from general knowledge.
+
+3. KEY POINTS
+
+- Capture the important arguments, definitions, principles, observations, conclusions and facts presented.
+- Preserve important technical details, figures, dates, formulas and stated relationships accurately.
+- Distinguish the lecturer's main points from questions, opinions, speculation and unresolved issues.
+- Do not omit material information simply to make the notes shorter.
+
+4. EXPLANATIONS
+
+- Clarify the concepts using the explanations provided in the transcript.
+- Reorganise spoken explanations into clear written English without changing their meaning.
+- Correct obvious transcription and grammatical errors only where the intended meaning is clear.
+- Do not add external explanations, unsupported interpretations or assumed steps to an incomplete explanation.
+- If a concept is mentioned but not explained, do not manufacture an explanation.
+
+5. EXAMPLES
+
+- Include examples, case studies, demonstrations and illustrations explicitly mentioned in the transcript.
+- Preserve the relationship between each example and the concept it illustrates.
+- Do not invent examples or present hypothetical scenarios as examples used by the lecturer.
+- If no examples were provided, write "Not specified."
+
+6. IMPORTANT TERMS
+
+- Extract important technical terms, abbreviations, specialist vocabulary and definitions used in the transcript.
+- Preserve the original terminology and explain a term only when the source provides its meaning.
+- Expand abbreviations only when their full forms are stated or unambiguously established by the supplied material.
+- Do not invent definitions or substitute technical terms with similar but potentially different concepts.
+
+7. SUMMARY
+
+- Provide a concise recap of the main concepts and conclusions covered in the transcript.
+- Ensure the summary reflects the notes and does not introduce new information.
+- Do not claim that the lecture established a conclusion or achieved a learning objective unless the source supports that claim.
+
+8. STUDY POINTS
+
+- Present revision points drawn directly from the material covered.
+- Include important definitions, principles, formulas, distinctions and conclusions where available.
+- Do not create new factual claims or introduce material absent from the transcript.
+- You may organise source-supported information as revision questions or prompts, but do not introduce new subject matter or imply that the lecturer supplied questions that were not recorded.
+- Distinguish explicit lecturer instructions or examination guidance from general revision prompts created by organising the source material.
+
+TECHNICAL ACCURACY AND QUALITY CONTROL
+
+- Treat the transcript as the primary source of evidence.
+- Never invent facts, definitions, formulas, statistics, examples, references, quotations or technical explanations.
+- Preserve names, terminology, equations, units and numerical values accurately.
+- Do not silently guess the intended meaning of unclear technical expressions.
+- Where an important statement is unclear, indicate that it is unclear rather than fabricating a correction.
+- Do not claim that a topic was covered comprehensively when the transcript contains only a brief mention.
+- Use "Not specified." when required information is absent.
+- If the transcript contains incomplete sentences, fragmented explanations or missing context, organise only the understandable material.
+- Avoid repetitive content, generic filler and unsupported conclusions.
+- Use clear, professional language appropriate to the likely learning context without assuming the learner's academic level.
+- Before returning the notes, verify that the eight sections appear once, in order, and that the summary agrees with the material presented.
+- Return only the completed lecture notes, without drafting commentary or explanations of these instructions.
 """,
 
             "interview_report": """
@@ -4134,31 +4533,477 @@ Use:
 7. Summary
 
 Do not invent answers, names or facts.
+
+ADDITIONAL PROFESSIONAL INTERVIEW REPORT REQUIREMENTS
+
+PURPOSE AND REPORTING STANDARD
+
+- Produce a clear, factual and professionally organised interview report based strictly on the supplied transcript.
+- Retain the existing seven-section structure and present the sections in the prescribed order.
+- Preserve the substance of the interview without reproducing every word spoken.
+- Use neutral, professional language appropriate to the interview's context.
+- Distinguish the interviewer's questions from the interviewee's answers, comments and opinions.
+- Do not assume that the interview is for recruitment, research, journalism or stakeholder engagement unless the source establishes its purpose.
+
+1. INTERVIEW SUBJECT
+
+- Identify the interview subject, interviewer, interview date, location or platform, purpose and organisational affiliations only where supplied.
+- Do not invent names, job titles, organisations, contact details, dates or interview arrangements.
+- If the interviewee's identity is not established, use "Not specified."
+- If multiple interviewees are present, distinguish them only where the transcript provides sufficient evidence.
+
+2. MAIN TOPICS
+
+- Identify the principal subjects actually discussed during the interview.
+- Arrange topics logically while preserving the sequence where it is important to understanding the discussion.
+- Distinguish the interview's stated purpose from topics that arose incidentally.
+- Do not introduce external context, assumed motivations or additional subject areas.
+
+3. KEY QUESTIONS
+
+- Record the substantive questions asked by the interviewer or other identified participants.
+- Preserve the meaning of each question while correcting obvious transcription errors.
+- Group closely related questions only where their meanings remain clear.
+- Do not invent questions to make the interview appear more comprehensive.
+- If a question is unclear or incomplete, do not reconstruct missing wording based on assumptions.
+
+4. RESPONSES
+
+- Summarise the interviewee's actual responses accurately and attribute them to the correct speaker where identifiable.
+- Preserve important explanations, examples, figures, dates, qualifications and conditions.
+- Distinguish a direct answer from an indirect response, an opinion, a refusal to answer or an unresolved question where the transcript supports that distinction.
+- Do not make an incomplete answer appear definitive.
+- Do not treat an interviewee's allegation, belief, prediction or opinion as an independently verified fact.
+- Do not infer agreement, acceptance, responsibility or commitment from a response unless explicitly supported.
+- Where a question receives no recorded answer, state "No response recorded in the source material."
+
+5. IMPORTANT STATEMENTS
+
+- Capture material statements, declarations, concerns, explanations, promises and qualifications that are explicitly present in the transcript.
+- Use direct quotations only when the wording is sufficiently clear and faithful to the recording.
+- Otherwise, paraphrase accurately without quotation marks.
+- Attribute statements to the correct speaker where possible.
+- Preserve important disagreements, reservations and conditions.
+- Do not exaggerate a statement, remove a qualification that changes its meaning, or attribute a statement to the wrong person.
+- Distinguish stated intentions and promises from actions that have actually been completed.
+
+6. KEY FINDINGS
+
+- Present findings that can reasonably be established from the interview content.
+- Distinguish information explicitly stated by the interviewee from observations about the interview itself.
+- Do not present unverified claims as established facts.
+- Do not infer motives, personality traits, credibility, competence, guilt, intent or psychological characteristics from the transcript.
+- Do not make hiring recommendations, research conclusions or media judgements unless the source explicitly supports that purpose and conclusion.
+- If the interview does not support a substantive finding, state "Not specified in the source material."
+
+7. SUMMARY
+
+- Provide a concise overview of the interview's main topics, responses and important statements.
+- Ensure the summary is consistent with the detailed sections and introduces no new information.
+- Preserve unresolved questions, important qualifications and material disagreements.
+- Do not describe an issue as resolved or an objective as achieved unless the transcript supports that conclusion.
+
+SOURCE ACCURACY AND QUALITY CONTROL
+
+- Treat the transcript as the primary source of evidence and use additional details only when explicitly supplied as input.
+- Never invent answers, names, designations, affiliations, quotations, dates, statistics, events, commitments or conclusions.
+- Preserve Nigerian names, local terminology, institutional names and technical expressions accurately.
+- Correct obvious transcription and grammatical errors only when the intended meaning is clear.
+- Do not confuse speakers when attribution is uncertain.
+- Do not fill gaps in the interview using assumptions, general knowledge or external information.
+- If the transcript contains conflicting statements, preserve the distinction and identify the inconsistency where material.
+- If the transcript is incomplete, report only the available material.
+- Use "Not specified in the source material" when relevant information is unavailable.
+- Avoid repetition, generic filler and unsupported analysis.
+- Before returning the report, verify that all seven sections appear once, in order, and that the summary agrees with the responses and findings.
+- Return only the completed interview report, without drafting notes or explanations of these instructions.
 """,
 
+            
             "general_report": """
-Create a clear professional general report based strictly on the transcript.
+Prepare a comprehensive, formal, factual report suitable
+for submission to Management following an official event,
+conference, workshop, training, seminar, or meeting.
 
-Use:
-1. Title
-2. Overview
-3. Key Points
-4. Detailed Discussion
-5. Findings
-6. Conclusion
-7. Recommendations
+The report must document what happened, who participated,
+what was discussed, what was achieved, the significance
+of the event, and the actions that may follow. Do not
+produce merely a short summary.
 
-STRICT SOURCE-BASED RULES:
-- Use ONLY information explicitly stated in the transcript.
-- Do not invent, infer, assume, or add facts that are not stated.
-- Do not create new recommendations.
-- Under "Recommendations", include only recommendations explicitly stated in the transcript.
-- Do not turn your own analysis or interpretation into a recommendation.
-- Do not create new conclusions that go beyond the transcript.
-- Do not create statistics, targets, deadlines, dates, names, participants, decisions, causes, risks, strategies, or outcomes that are not stated.
-- Do not create action items that were not stated.
-- If a section is not supported by the transcript, write "Not specified".
-- You may reorganize and summarize information from the transcript, but preserve its original meaning.
+REPORT STRUCTURE
+
+Use the following numbered headings in this order.
+Populate each section using the available source material.
+If information is unavailable, state "Not specified in
+the source material." Do not invent content to fill gaps.
+
+1. COVER PAGE
+
+Include, where available:
+- Name of the organisation or institution submitting
+  the report.
+- Full official title of the event.
+- Official theme.
+- Lead event organiser.
+- Collaborators, partners and sponsors.
+- Venue and location.
+- Event date, duration, start date and end date.
+- Department or unit responsible for the report.
+- Report submission date.
+- Name and designation of the reporting officer, only
+  where supplied.
+
+Do not assume that the transcript's recording date is
+the event date or report submission date. Do not invent
+an organisation, theme, title, venue or reporting officer.
+
+2. EXECUTIVE SUMMARY
+
+Provide a concise but substantive overview covering:
+- Purpose and context of the event.
+- Organiser and participant categories.
+- Major presentations, discussions and proceedings.
+- Significant findings and confirmed outcomes.
+- Important challenges or unresolved issues.
+- Recommendations supported by the source material.
+
+The executive summary must accurately reflect the body
+of the report and must not introduce new facts.
+
+3. INTRODUCTION AND BACKGROUND
+
+Explain the background, context and purpose of the event
+using information available in the source. Include the
+stated institutional, policy or sector context and the
+event's importance to the organisation where supported.
+
+Do not invent policy context, institutional mandates or
+background information absent from the source.
+
+4. EVENT DETAILS
+
+Present a clear table with the following fields:
+- Event title
+- Theme
+- Lead organiser
+- Collaborators and sponsors
+- Date and duration
+- Venue and location
+- Participants and represented organisations
+- Representatives, designations and organisations
+
+Use "Not specified in the source material" for missing
+details. Do not infer attendance from speakers mentioned
+in the discussion.
+
+5. OBJECTIVES OF THE EVENT
+
+Record the objectives stated by the organiser or
+participants. Explain the event's intended purpose where
+supported. Do not present assumed objectives as official
+objectives. If none are recorded, state that clearly.
+
+6. OPENING CEREMONY AND KEY ADDRESSES
+
+Document the opening proceedings in their recorded order.
+For each identified speaker, include where available:
+- Full name
+- Official designation
+- Organisation
+- Purpose or subject of the address
+- Main messages and issues raised
+- Proposals, recommendations or commitments
+- Relevance to the event
+
+Explain the substance of each address rather than merely
+stating that the speaker delivered an address.
+
+Do not invent quotations or attribute statements,
+opinions or commitments to a speaker without evidence.
+If no opening ceremony or address is recorded, state that.
+
+7. PROCEEDINGS AND DISCUSSIONS BY SESSION OR DAY
+
+Organise the proceedings chronologically by day, session,
+presentation or discussion, as supported by the source.
+
+For each identifiable session, capture:
+- Session title or theme
+- Moderator, presenter or speaker
+- Designation and organisation, where provided
+- Main issues and arguments discussed
+- Evidence, statistics and examples presented
+- Questions raised and responses given
+- Clarifications, conclusions and proposed actions
+
+Preserve important figures, dates, examples and technical
+or policy details accurately. Do not invent session titles,
+speakers, questions, answers or statistics.
+
+For lengthy or multi-day events, provide sufficient detail
+to distinguish the sessions and explain their substance.
+Do not merge unrelated sessions into a generic summary.
+
+8. CONTRIBUTIONS OF REPRESENTATIVES AND PARTICIPATING ORGANISATIONS
+
+Identify representatives and participating organisations
+where they are explicitly mentioned. Explain each person's
+recorded presentation, intervention, question, response,
+recommendation or commitment and its relevance to the
+discussion.
+
+If a person is mentioned only as an attendee, do not
+attribute an intervention to that person. Do not invent
+names, designations, affiliations or contributions.
+
+9. KEY FINDINGS, OBSERVATIONS AND OUTCOMES
+
+Separate and clearly identify:
+- Key findings and lessons learned
+- Important observations
+- Challenges identified
+- Opportunities for collaboration
+- Confirmed decisions and resolutions
+- Commitments actually made
+- Proposals that remain unapproved
+- Matters requiring further investigation
+
+Do not present a suggestion as an adopted decision.
+Do not claim that an objective was achieved unless the
+source provides evidence supporting that conclusion.
+
+10. RELEVANCE TO THE ORGANISATION
+
+Explain the relevance of the event to the organisation
+only to the extent supported by the transcript and any
+additional context supplied by the user.
+
+Where supported, discuss:
+- Potential institutional benefits
+- Connections to stated programmes or policies
+- Opportunities for collaboration
+- Operational or regulatory implications
+- Risks, gaps or issues requiring attention
+- Possible improvements to the organisation's work
+
+Clearly distinguish documented facts from analysis.
+Label implications as potential where they have not been
+formally established. Do not invent the organisation's
+mandate, programmes, policies or strategic objectives.
+
+11. RECOMMENDATIONS AND ACTION POINTS
+
+Provide recommendations that are directly supported by
+the event's findings and discussions.
+
+Use an action-oriented table with these columns:
+- S/N
+- Recommendation
+- Proposed action
+- Responsible unit or person
+- Expected outcome
+- Timeline, where specified
+
+Include exactly three prioritised recommendations only
+when three meaningful recommendations are supported by
+the source. If fewer are supported, provide fewer.
+Do not create additional recommendations just to reach
+three.
+
+Distinguish explicitly between:
+- Recommendations actually made during the event
+- Recommendations derived from documented findings
+- Actions formally agreed upon
+- Proposed actions requiring Management's approval
+
+Do not invent owners, budgets, deadlines, targets or
+expected results. Label unassigned responsibilities,
+timelines and proposed actions as "Proposed" or
+"Not specified", as appropriate.
+
+12. CHALLENGES AND ISSUES REQUIRING FOLLOW-UP
+
+Document recorded technical, operational, financial,
+policy, regulatory or coordination challenges, unresolved
+questions and outstanding commitments.
+
+Explain the issue and any follow-up explicitly identified.
+Do not manufacture challenges simply to fill this section.
+If none are recorded, say so.
+
+13. CONCLUSION
+
+Summarise the event's significance, principal documented
+outcomes and relevance to the organisation. Reinforce the
+importance of supported follow-up actions without
+introducing new facts or recommendations.
+
+14. ATTENDANCE AND REPRESENTATIVES' DETAILS
+
+Where names and details are available, provide a table:
+- S/N
+- Full name
+- Designation
+- Organisation
+- Role at the event
+
+Distinguish speakers, presenters, moderators and other
+participants only where the source supports the role.
+Do not claim that the list is a complete attendance
+register unless the source establishes that it is.
+
+If attendance information is unavailable, state that an
+attendance register was not provided in the source.
+
+15. APPENDICES AND SUPPORTING DOCUMENTS
+
+List supporting materials only when they are supplied
+or explicitly identified in the source, such as:
+- Event programme or agenda
+- Presentation slides
+- Attendance register
+- Photographs and captions
+- Communiqués or resolutions
+- Statistics, charts or tables
+- Materials distributed during the event
+
+Do not claim that an appendix is attached when it is not.
+If no supporting documents are provided, state this.
+
+REPORT QUALITY, EVIDENCE AND CONSISTENCY CONTROLS
+
+REPORTING APPROACH
+
+- Treat this as an official institutional report, not a generic essay, an event template or an expanded transcript.
+- Organise the source material into a coherent, readable report while preserving the meaning, sequence and context of the recorded proceedings.
+- Give appropriate detail to substantive presentations, discussions, findings and decisions. Do not give every section equal length when the source material does not justify it.
+- Where the source describes a meeting, planning session or internal discussion rather than a formal event, report the activity accurately without implying that a ceremony, conference or formal programme took place.
+- Do not claim that the report covers the entire event if the transcript covers only a particular session or part of the proceedings.
+
+EVIDENCE AND INTERPRETATION
+
+- Before writing a factual statement, ensure that it is supported by the transcript or by additional event information explicitly supplied as input.
+- Do not use general knowledge, internet knowledge, common institutional practices or assumptions to fill gaps in the source.
+- Do not describe an event as successful, impactful, productive or effective unless the source contains evidence supporting that assessment.
+- Do not claim that a programme, policy, project or initiative achieved its objectives merely because it was discussed or presented.
+- Where an analytical observation is appropriate under Section 10, clearly distinguish it from a recorded fact and qualify it as a potential implication where necessary.
+- Do not use phrases such as "it was agreed", "participants resolved", "the meeting concluded", "the event achieved" or "Management was advised" unless the source supports the specific statement.
+- Do not infer consensus from the absence of objections or infer approval from a proposal being discussed.
+- Do not attribute a collective position to all participants when only one speaker expressed it.
+- Where the source contains conflicting statements, preserve the distinction and identify the discrepancy where relevant instead of choosing one version without evidence.
+- If a statement is unclear or a transcription error cannot be resolved confidently, retain only the understandable information and indicate that the detail is unclear where material.
+
+DECISIONS, RECOMMENDATIONS AND ACTIONS
+
+- Classify each recorded item accurately as a fact, observation, question, proposal, recommendation, instruction, decision, resolution, commitment or action.
+- Record a decision as confirmed only where the source explicitly supports that status.
+- A request to submit information must not automatically become an approved organisational action plan.
+- A recommendation may be included as a report recommendation derived from documented findings only when the reasoning is directly supported by the source. Clearly distinguish it from a recommendation actually made during the event.
+- Do not convert a general discussion point into an action item without evidence of a required action.
+- If the source records an action but does not identify its owner or deadline, report the action and state that the owner or deadline was not specified.
+- Do not assign responsibility to a department, individual or organisation based on assumptions about their usual duties.
+- Do not invent measurable targets, expected benefits, financial implications or implementation arrangements.
+- If no evidence supports a recommendation, state that no specific recommendation can be established from the available source material.
+
+SECTION MANAGEMENT
+
+- Use each of the 15 numbered headings once and in the prescribed order.
+- Reproduce the heading wording exactly as supplied in REPORT STRUCTURE.
+- Do not add a second cover page, duplicate executive summary or repeat the full report under different headings.
+- Where information is relevant to multiple sections, cross-reference it briefly or present it in the most appropriate section rather than repeating lengthy passages.
+- If a section is not applicable to the recorded activity, explain briefly that it was not recorded or is not applicable, as appropriate. Do not invent content to make the section appear complete.
+- Use tables for event details, attendance information and action points where the source supports the required fields. Do not create artificial table entries to fill missing fields.
+- Use consistent date, number, currency and designation formats, while preserving the original values and meaning.
+- Use direct quotations only when the wording is available and sufficiently clear in the source. Otherwise, paraphrase accurately without quotation marks.
+- Do not manufacture an appendix, attendance register, programme, resolution or supporting document.
+
+FINAL QUALITY CONTROL BEFORE RETURNING THE REPORT
+
+Before presenting the final report, silently verify that:
+
+1. All 15 required sections appear once, in the correct order, with the exact prescribed headings.
+2. Every material factual statement is supported by the supplied source material.
+3. Names, titles, designations, organisations, dates, figures, statistics and technical terms have not been invented or altered.
+4. Suggestions, instructions, recommendations, decisions and commitments are correctly distinguished.
+5. The executive summary agrees with the detailed report and introduces no additional claims.
+6. Recommendations and action points are supported by the source or are clearly identified as proposed report recommendations based on documented findings.
+7. Missing information is explicitly identified rather than guessed.
+8. No generic filler, repeated paragraphs, unsupported institutional background or duplicated report sections remain.
+9. The report does not claim that documents are attached, decisions were approved or outcomes were achieved without supporting evidence.
+10. The length and level of detail are proportionate to the actual source material.
+
+Return only the completed report. Do not include the internal quality-control checklist, drafting notes, explanations of the prompt or unsupported commentary.
+
+ADDITIONAL RULE FOR OBJECTIVES, AGREEMENTS AND RECOMMENDATIONS
+
+- Record objectives only when explicitly stated or clearly
+  documented in the source material.
+- Do not describe inferred objectives as official objectives.
+- A request or instruction does not establish acceptance,
+  agreement or commitment by the people receiving it.
+- Do not report an agreement, commitment, decision or
+  resolution unless the transcript explicitly records it.
+- Do not create recommendations merely because they seem
+  like reasonable next steps.
+- If no recommendations are supported by the source,
+  state that clearly.
+
+STRICT SOURCE-BASED AND ACCURACY RULES
+
+- Use the transcript as the primary source of evidence.
+- Use additional event details only when explicitly
+  supplied as input to the report.
+- A request or instruction does not establish acceptance,
+  agreement or commitment by the people receiving it.
+- Do not report an agreement, commitment, decision or
+  resolution unless the transcript explicitly records it.
+- Do not create recommendations merely because they seem
+  like reasonable next steps. If no recommendations are
+  supported by the source, state that clearly.
+- Never invent facts, names, titles, designations,
+  organisations, dates, venues, themes, statistics,
+  quotations, attendance, questions, responses, decisions,
+  commitments, achievements or outcomes.
+- Preserve the original meaning of the source.
+- Preserve Nigerian names, local terminology, government
+  agencies and organisational names accurately.
+- Correct grammar and obvious transcription errors only
+  when the intended meaning is clear.
+- Do not treat a person's presence as evidence that the
+  person spoke or made a commitment.
+- Do not turn a proposal into a confirmed decision.
+- Do not turn discussion into an agreed action.
+- Do not invent institutional context or external facts.
+- Use "Not specified in the source material" for missing
+  information rather than guessing.
+- If the transcript is incomplete or covers only part
+  of an event, report only the available material and
+  make no claim that the record is comprehensive.
+- If information from separate transcript sections is
+  incomplete, do not invent connecting details.
+- Avoid repetition, generic filler and unsupported claims.
+- Use formal, clear professional English suitable for
+  senior Management and official institutional records.
+- Use numbered headings, informative paragraphs and
+  tables where appropriate.
+- Let the report's length reflect the source material.
+  Aim for approximately 5–7 pages when sufficient
+  substantive information is available, but do not pad
+  a short transcript to reach a target length.
+
+FINAL OVERRIDE — MANDATORY ACCURACY RULES
+
+These rules take precedence over any earlier instruction in this prompt that could be interpreted differently.
+
+1. Do not create a recommendation, action point, deadline, submission mechanism or follow-up meeting unless it is explicitly recorded in the source. A reasonable suggestion is not evidence that the suggestion was made.
+2. Do not describe a request or instruction as an agreement, acceptance or commitment. Record only the action requested and who requested it, where known.
+3. Never use expressions such as "implicit commitment", "implied agreement" or "agreed to" to describe an unconfirmed action.
+4. In Section 5, distinguish explicitly stated objectives from the purpose apparent in the discussion. If no official objective is recorded, state "Not specified in the source material." Do not label inferred purposes as official objectives.
+5. Use the exact prescribed heading "8. CONTRIBUTIONS OF REPRESENTATIVES AND PARTICIPATING ORGANISATIONS".
+6. Use the exact prescribed heading "12. CHALLENGES AND ISSUES REQUIRING FOLLOW-UP".
+7. Include all 15 sections exactly once and in order, even when some sections contain only a short statement that information was not specified.
+8. Before returning the report, check the complete report for contradictions, unsupported recommendations, invented commitments, duplicated sections and heading deviations. Correct these issues before returning the final report.
+9. Do not sacrifice factual accuracy to make the report appear more comprehensive. Never fill a gap with a plausible but unrecorded fact.
 """,
 
             "summary_key_points": """
@@ -4181,6 +5026,65 @@ STRICT SOURCE-BASED RULES:
 - You may shorten and reorganize the transcript, but preserve its original meaning.
 - If a section is not supported by the transcript, write "Not specified".
 - Avoid unnecessary repetition.
+
+ADDITIONAL PROFESSIONAL SUMMARY AND KEY POINTS REQUIREMENTS
+
+PURPOSE AND REPORTING STANDARD
+
+- Produce a concise, accurate and well-organised summary of the supplied transcript.
+- Retain the existing four-section structure and use the headings in the prescribed order.
+- Capture the most important information without reproducing the entire transcript.
+- Give prominence to substantive statements, facts, figures, issues and explicitly stated conclusions.
+- Adjust the length to the amount and importance of information in the source. Do not pad a short transcript or omit important details from a substantive one.
+- Use clear, professional English appropriate to the transcript's context.
+
+1. SUMMARY
+
+- Present a balanced overview of the main subject, purpose and discussion as recorded in the transcript.
+- Identify the principal speakers, organisations or events only where supplied and relevant.
+- Distinguish the subject being discussed from any outcome actually achieved.
+- Do not claim that the discussion was successful, productive, conclusive or effective unless the source explicitly supports that assessment.
+- Do not introduce background information or context that is absent from the source.
+
+2. KEY POINTS
+
+- Extract the most important facts, statements, arguments, issues and developments explicitly mentioned.
+- Organise related points into clear bullets without changing their original meaning.
+- Preserve important qualifications, disagreements, conditions and uncertainties.
+- Attribute a statement to a speaker or organisation only when the source supports the attribution.
+- Do not turn a question into a fact, an opinion into a verified finding, a proposal into a decision or a request into a commitment.
+- Do not add recommendations or action items merely because they appear to be sensible next steps.
+
+3. IMPORTANT INFORMATION
+
+- Preserve material names, organisations, designations, locations, dates, amounts, statistics, technical terms and other details provided in the transcript.
+- Reproduce figures, units and numerical relationships accurately.
+- Include deadlines, responsibilities and decisions only where they are explicitly stated.
+- Distinguish confirmed information from allegations, estimates, predictions, opinions and proposals.
+- Do not infer missing details or silently correct unclear figures, names or technical expressions.
+- If a detail is unclear and materially affects the meaning, indicate that it is unclear rather than guessing.
+
+4. CONCLUSIONS
+
+- Include only conclusions explicitly stated in the transcript.
+- Distinguish conclusions reached by an identified speaker from formal conclusions adopted by a meeting or organisation.
+- Do not treat the end of a discussion, the absence of objections or a speaker's opinion as proof of a collective conclusion.
+- Do not create recommendations, decisions, outcomes, causal explanations or implications that are not stated.
+- If no explicit conclusion appears in the transcript, write "Not specified."
+
+SOURCE ACCURACY AND QUALITY CONTROL
+
+- Treat the supplied transcript as the primary source of evidence.
+- Use additional information only when explicitly supplied as input.
+- Never invent names, dates, events, quotations, figures, statistics, decisions, commitments, recommendations or outcomes.
+- Preserve Nigerian names, local terminology, institutional names and technical expressions accurately.
+- Correct obvious transcription errors only when the intended meaning is clear.
+- If statements conflict, preserve the distinction and identify the inconsistency where material rather than choosing a version without evidence.
+- If the transcript is incomplete, summarise only the available material and do not imply that the summary covers information that was not provided.
+- Use "Not specified" when a section or relevant detail is unsupported by the source.
+- Avoid repetition, generic filler, exaggerated language and unsupported interpretations.
+- Before returning the summary, verify that all four sections appear once, in order, and that the summary, key points, important information and conclusions are consistent.
+- Return only the completed summary, without drafting notes or explanations of these instructions.
 """,
 
             "action_items": """
@@ -4205,6 +5109,69 @@ STRICT SOURCE-BASED RULES:
 - If a responsible person, deadline, or priority is not provided, write "Not specified".
 - Preserve the original meaning of each action.
 - If the transcript contains no actionable tasks, state "No actionable items specified."
+
+ADDITIONAL PROFESSIONAL ACTION TRACKER REQUIREMENTS
+
+PURPOSE AND REPORTING STANDARD
+
+- Produce a clear, accurate and practical action tracker based strictly on the supplied transcript.
+- Retain the existing table structure and use the five columns in the prescribed order.
+- Capture only actionable tasks explicitly stated in the source.
+- Use concise, specific wording that preserves the original meaning of each task.
+- Do not create a task simply because a discussion suggests that further work might be useful.
+- Do not add generic project-management advice or recommendations.
+
+ACTION ITEM
+
+- Record the task or action that the transcript explicitly identifies as required, assigned, directed or agreed.
+- Preserve the scope of the task. Do not expand a narrowly stated task into a larger deliverable or project.
+- Distinguish an assigned action from a proposal, suggestion, question, intention or general statement.
+- Do not treat a request as an accepted commitment unless acceptance is explicitly recorded.
+- Where the source identifies several distinct actions, list them separately when doing so improves accountability without changing their meaning.
+- Do not split one action into multiple tasks unless the source establishes separate deliverables or responsibilities.
+
+RESPONSIBLE PERSON
+
+- Record the named individual, team, department or organisation only when the source explicitly assigns responsibility.
+- Do not infer ownership from a person's job title, department, participation in the discussion or usual duties.
+- If a chair directs a named person to act, record that assignment accurately.
+- If a request is addressed to an unidentified group, do not invent individual owners.
+- Where the responsible person or unit is absent, write "Not specified".
+
+DEADLINE
+
+- Record deadlines, dates or time periods only when explicitly stated in the transcript.
+- Preserve the original date and time information accurately.
+- Do not calculate or assume a deadline from phrases such as "soon", "urgently" or "before the next meeting" unless the source provides a specific deadline.
+- If the transcript says "before the next meeting" but does not state its date, preserve that wording as the stated deadline condition without inventing a calendar date.
+- If no deadline or deadline condition is provided, write "Not specified".
+
+PRIORITY
+
+- Record a priority such as High, Medium or Low only when the transcript explicitly assigns that priority or clearly uses an equivalent, unambiguous classification.
+- Do not infer priority from urgency, importance, the speaker's seniority or the nature of the task.
+- Do not convert words such as "urgent" into a formal priority classification unless the source establishes that meaning.
+- If priority is not explicitly stated, write "Not specified".
+
+NOTES
+
+- Use this column for relevant context explicitly stated in the transcript, such as dependencies, conditions, deliverables, clarifications or recorded progress.
+- Distinguish completed actions from outstanding tasks only where the source provides evidence of their status.
+- Do not add interpretations, unsupported risks, recommendations, assumptions or additional instructions.
+- If no relevant contextual information is recorded, write "Not specified".
+
+OUTPUT AND VALIDATION
+
+- If actionable tasks are found, return a table with these columns in this exact order:
+  Action Item | Responsible Person | Deadline | Priority | Notes
+- If the transcript contains no actionable tasks, state exactly:
+  "No actionable items specified."
+- Do not fill the table with discussion topics, observations, recommendations or hypothetical tasks.
+- Do not create placeholder task rows simply to make the table look complete.
+- Do not duplicate the same action in multiple rows unless the transcript establishes distinct assignments.
+- Ensure that every action item can be traced to an explicit statement in the source.
+- Before returning the result, verify that owners, deadlines, priorities and notes have not been invented.
+- Return only the action tracker, without drafting notes or explanations of these instructions.
 """,
         }
 
