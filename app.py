@@ -1585,7 +1585,7 @@ def admin_payments():
             "has_prev": pagination.has_prev,
         }
     }), 200
-    
+
 # ============================================================
 # AUTHENTICATION - CURRENT USER
 # ============================================================
@@ -3144,7 +3144,7 @@ def transcribe_video():
             ),
             "code": "video_transcription_start_error",
         }), 500
-    
+
 
 # ============================================================
 # TRANSCRIPTION
@@ -4032,10 +4032,24 @@ Return only the corrected report.
         except Exception as error:
             error_text = str(error)
 
+            error_lower = error_text.lower()
+
+            # Daily quota exhaustion will not be fixed by short retries.
+            if (
+                "tokens per day" in error_lower
+                or "daily token limit" in error_lower
+            ):
+                raise RuntimeError(
+                    "The AI service has reached its daily token limit. "
+                    "Please try again after the quota resets."
+                ) from error
+
+            # Retry temporary rate limits, such as per-minute limits.
             if (
                 "429" in error_text
-                or "rate_limit_exceeded" in error_text
+                or "rate_limit_exceeded" in error_lower
             ):
+                # Keep your existing retry logic here.
                 wait_seconds = 20.0
 
                 match = re.search(
@@ -4619,7 +4633,7 @@ SOURCE ACCURACY AND QUALITY CONTROL
 - Return only the completed interview report, without drafting notes or explanations of these instructions.
 """,
 
-            
+
             "general_report": """
 Prepare a comprehensive, formal, factual report suitable
 for submission to Management following an official event,
@@ -5292,12 +5306,37 @@ SOURCE SECTION {index}
             "report": report,
         }), 200
 
+
     except Exception as e:
 
         print("=" * 60)
         print("STRUCTURED REPORT ERROR")
         print("=" * 60)
         print(e)
+
+        error_text = str(e).lower()
+
+        # Handle exhausted Groq daily token quota.
+
+        if (
+            "tokens per day" in error_text
+            or "daily token limit" in error_text
+            or "daily token quota" in error_text
+            or (
+                "rate_limit_exceeded" in error_text
+                and "tpd" in error_text
+            )
+        ):
+
+            return jsonify({
+                "success": False,
+                "error": (
+                    "The AI report-generation service has "
+                    "reached its daily usage limit. "
+                    "Please try again after the quota resets."
+                ),
+                "code": "ai_daily_quota_exceeded",
+            }), 429
 
         return jsonify({
             "success": False,
@@ -5307,6 +5346,7 @@ SOURCE SECTION {index}
             ),
             "code": "structured_report_error",
         }), 500
+
 
 # ============================================================
 # TRANSCRIPT TRANSLATION
