@@ -10,6 +10,7 @@ import threading
 import uuid
 import hmac
 import hashlib
+import secrets
 
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
@@ -24,6 +25,7 @@ from models import (
     CreditTransaction,
     Payment,
     TranscriptionHistory,
+    AdminAuditLog,
 )
 
 from subscription_service import (
@@ -379,6 +381,13 @@ def login():
             "error": "Invalid email or password."
         }), 401
 
+    # Reject blocked accounts without issuing a JWT.
+    if user.is_blocked:
+        return jsonify({
+            "success": False,
+            "error": "This account has been blocked. Please contact support."
+        }), 403
+
     # Create JWT payload
     now = datetime.now(timezone.utc)
 
@@ -406,6 +415,7 @@ def login():
         "expires_in": JWT_EXPIRATION_HOURS * 60 * 60,
         "user": user.to_dict()
     }), 200
+
 
 
 def get_authenticated_user():
@@ -442,7 +452,6 @@ def get_authenticated_user():
         )
 
     try:
-
         payload = jwt.decode(
             token,
             jwt_secret_key,
@@ -452,8 +461,6 @@ def get_authenticated_user():
         user_id = payload.get("sub")
 
         if not user_id:
-            print("JWT PAYLOAD HAS NO SUB:", payload)
-
             return None, (
                 jsonify({
                     "success": False,
@@ -473,10 +480,7 @@ def get_authenticated_user():
                 401
             )
 
-        user = db.session.get(
-            User,
-            user_id
-        )
+        user = db.session.get(User, user_id)
 
         if not user:
             return None, (
@@ -487,10 +491,19 @@ def get_authenticated_user():
                 404
             )
 
+        # Enforce blocking even when the user has an existing JWT.
+        if user.is_blocked:
+            return None, (
+                jsonify({
+                    "success": False,
+                    "error": "This account has been blocked. Please contact support."
+                }),
+                403
+            )
+
         return user, None
 
     except jwt.ExpiredSignatureError:
-
         return None, (
             jsonify({
                 "success": False,
@@ -500,7 +513,10 @@ def get_authenticated_user():
         )
 
     except jwt.InvalidTokenError as e:
-        print("JWT DECODE ERROR:", type(e).__name__, str(e))
+        app.logger.warning(
+            "JWT validation failed: %s",
+            type(e).__name__
+        )
 
         return None, (
             jsonify({
@@ -509,6 +525,7 @@ def get_authenticated_user():
             }),
             401
         )
+
 
 
 # ============================================================
@@ -532,6 +549,33 @@ def require_admin():
         )
 
     return user, None
+
+
+def record_admin_action(
+    admin,
+    action,
+    affected_user_id=None,
+    outcome="success",
+    reason=None
+):
+    """Add an audit record to the current database transaction."""
+
+    entry = AdminAuditLog(
+        admin_user_id=admin.id if admin else None,
+        affected_user_id=affected_user_id,
+        action=action[:100],
+        outcome=outcome[:30],
+        reason=reason[:500] if reason else None,
+        http_method=request.method[:10],
+        endpoint=request.path[:255],
+        ip_address=(
+            request.remote_addr[:45]
+            if request.remote_addr else None
+        ),
+    )
+
+    db.session.add(entry)
+
 
 
 # ============================================================
@@ -682,6 +726,16 @@ def admin_users():
             "id": user.id,
             "email": user.email,
             "role": user.role,
+
+            # Account security / blocking status
+            "is_blocked": user.is_blocked,
+            "blocked_at": (
+                user.blocked_at.isoformat()
+                if user.blocked_at
+                else None
+            ),
+            "blocked_reason": user.blocked_reason,
+
             "created_at": (
                 user.created_at.isoformat()
                 if user.created_at
@@ -757,12 +811,23 @@ def admin_user_details(user_id):
     # Build response
     # --------------------------------------------------------
 
+
     return jsonify({
         "success": True,
         "user": {
             "id": user.id,
             "email": user.email,
             "role": user.role,
+
+            # Account security / blocking status
+            "is_blocked": user.is_blocked,
+            "blocked_at": (
+                user.blocked_at.isoformat()
+                if user.blocked_at
+                else None
+            ),
+            "blocked_reason": user.blocked_reason,
+
             "created_at": (
                 user.created_at.isoformat()
                 if user.created_at
@@ -785,6 +850,7 @@ def admin_user_details(user_id):
             )
         }
     }), 200
+
 
 
 # ============================================================
@@ -916,6 +982,19 @@ def admin_update_user_subscription(user_id):
         user.id
     )
 
+        # Capture the previous values for the audit trail.
+    previous_plan = (
+        subscription.plan
+        if subscription
+        else None
+    )
+
+    previous_billing_cycle = (
+        subscription.billing_cycle
+        if subscription
+        else None
+    )
+
     if subscription:
 
         subscription.plan = plan
@@ -947,7 +1026,32 @@ def admin_update_user_subscription(user_id):
             subscription
         )
 
-    db.session.commit()
+
+    try:
+        record_admin_action(
+            admin=admin,
+            action="user_subscription_updated",
+            affected_user_id=user.id,
+            reason=(
+                f"Subscription changed from "
+                f"{previous_plan or 'none'}"
+                f"/{previous_billing_cycle or 'none'} "
+                f"to {plan}/{billing_cycle}"
+            )
+        )
+
+        db.session.commit()
+
+    except Exception:
+        db.session.rollback()
+        app.logger.exception(
+            "Admin subscription update failed"
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to update the user subscription."
+        }), 500
 
     return jsonify({
         "success": True,
@@ -956,9 +1060,204 @@ def admin_update_user_subscription(user_id):
     }), 200
 
 
+
+# ============================================================
+# ADMIN - BLOCK USER
+# ============================================================
+
+@app.route(
+    "/api/admin/users/<int:user_id>/block",
+    methods=["POST"]
+)
+def admin_block_user(user_id):
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get("reason", "")).strip()
+
+    if not reason:
+        return jsonify({
+            "success": False,
+            "error": "A reason is required."
+        }), 400
+
+    target = db.session.get(User, user_id)
+
+    if not target:
+        return jsonify({
+            "success": False,
+            "error": "User not found."
+        }), 404
+
+    if target.id == admin.id:
+        return jsonify({
+            "success": False,
+            "error": "You cannot block your own account."
+        }), 400
+
+    if target.is_blocked:
+        return jsonify({
+            "success": False,
+            "error": "This account is already blocked."
+        }), 409
+
+    try:
+        target.is_blocked = True
+        target.blocked_at = datetime.now(timezone.utc)
+        target.blocked_reason = reason[:500]
+
+        record_admin_action(
+            admin=admin,
+            action="user_blocked",
+            affected_user_id=target.id,
+            reason=reason
+        )
+
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "User account blocked.",
+            "user": {
+                "id": target.id,
+                "email": target.email,
+                "is_blocked": target.is_blocked,
+                "blocked_at": target.blocked_at.isoformat()
+                if target.blocked_at else None,
+                "blocked_reason": target.blocked_reason
+            }
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Admin block-user action failed")
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to block this user."
+        }), 500
+
+
+# ============================================================
+# ADMIN - UNBLOCK USER
+# ============================================================
+
+@app.route(
+    "/api/admin/users/<int:user_id>/unblock",
+    methods=["POST"]
+)
+def admin_unblock_user(user_id):
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    target = db.session.get(User, user_id)
+
+    if not target:
+        return jsonify({
+            "success": False,
+            "error": "User not found."
+        }), 404
+
+    if not target.is_blocked:
+        return jsonify({
+            "success": False,
+            "error": "This account is not blocked."
+        }), 409
+
+    try:
+        target.is_blocked = False
+        target.blocked_at = None
+        target.blocked_reason = None
+
+        record_admin_action(
+            admin=admin,
+            action="user_unblocked",
+            affected_user_id=target.id
+        )
+
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "User account unblocked.",
+            "user": {
+                "id": target.id,
+                "email": target.email,
+                "is_blocked": target.is_blocked
+            }
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Admin unblock-user action failed")
+
+        return jsonify({
+            "success": False,
+            "error": "Unable to unblock this user."
+        }), 500
+
+
+# ============================================================
+# ADMIN - AUDIT LOGS
+# ============================================================
+
+@app.route(
+    "/api/admin/audit-logs",
+    methods=["GET"]
+)
+def admin_audit_logs():
+    admin, auth_error = require_admin()
+
+    if auth_error:
+        return auth_error
+
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        per_page = int(request.args.get("per_page", 20))
+    except (ValueError, TypeError):
+        return jsonify({
+            "success": False,
+            "error": "Invalid pagination values."
+        }), 400
+
+    per_page = min(max(per_page, 1), 100)
+
+    pagination = AdminAuditLog.query.order_by(
+        AdminAuditLog.created_at.desc(),
+        AdminAuditLog.id.desc()
+    ).paginate(
+        page=page,
+        per_page=per_page,
+        error_out=False
+    )
+
+    return jsonify({
+        "success": True,
+        "logs": [
+            entry.to_dict()
+            for entry in pagination.items
+        ],
+        "pagination": {
+            "page": pagination.page,
+            "per_page": pagination.per_page,
+            "total": pagination.total,
+            "pages": pagination.pages,
+            "has_next": pagination.has_next,
+            "has_prev": pagination.has_prev
+        }
+    }), 200
+
+
+
 # ============================================================
 # PAYSTACK PAYMENT INITIALIZATION
 # ============================================================
+
 
 @app.route(
     "/api/payment/initialize",
@@ -1010,29 +1309,32 @@ def payment_initialize():
     if billing_cycle not in valid_billing_cycles:
         return jsonify({
             "success": False,
-            "error": (
-                "Billing cycle must be monthly, "
-                "6_months, or yearly."
-            )
+            "error": "Invalid billing cycle."
         }), 400
 
-    config = get_plan_config(plan)
+    plan_config = get_plan_config(plan)
 
-    if not config:
+    if not plan_config:
         return jsonify({
             "success": False,
-            "error": "Subscription plan not found."
+            "error": "Invalid subscription plan."
         }), 400
 
-    amount = config.get(
-        billing_cycle
-    )
+    amount = plan_config.get(billing_cycle)
 
-    if amount is None:
+    if (
+        amount is None
+        or not isinstance(amount, (int, float))
+        or isinstance(amount, bool)
+        or amount <= 0
+        or not float(amount).is_integer()
+    ):
         return jsonify({
             "success": False,
             "error": "Invalid subscription pricing."
         }), 400
+
+    amount = int(amount)
 
     reference = (
         f"NAB-{plan.upper()}-"
@@ -1045,32 +1347,7 @@ def payment_initialize():
         "payment/callback"
     )
 
-    try:
-
-        paystack_data = initialize_transaction(
-            email=user.email,
-            amount=amount,
-            reference=reference,
-            callback_url=callback_url,
-        )
-
-    except ValueError as error:
-
-        return jsonify({
-            "success": False,
-            "error": str(error),
-        }), 400
-
-    except Exception:
-
-        return jsonify({
-            "success": False,
-            "error": (
-                "Unable to initialize "
-                "Paystack payment."
-            ),
-        }), 502
-
+    # STEP 1: Save the pending payment locally first.
     payment = Payment(
         user_id=user.id,
         plan=plan,
@@ -1088,8 +1365,11 @@ def payment_initialize():
         db.session.commit()
 
     except Exception:
-
         db.session.rollback()
+
+        app.logger.exception(
+            "Could not save pending payment."
+        )
 
         return jsonify({
             "success": False,
@@ -1099,6 +1379,74 @@ def payment_initialize():
             ),
         }), 500
 
+    # STEP 2: Initialize the transaction with Paystack.
+    try:
+        paystack_data = initialize_transaction(
+            email=user.email,
+            amount=amount,
+            reference=reference,
+            callback_url=callback_url,
+        )
+
+        authorization_url = paystack_data.get(
+            "authorization_url"
+        )
+
+        access_code = paystack_data.get(
+            "access_code"
+        )
+
+        paystack_reference = paystack_data.get(
+            "reference"
+        )
+
+        if (
+            not authorization_url
+            or not access_code
+            or paystack_reference != reference
+        ):
+            app.logger.error(
+                "Paystack returned an incomplete or "
+                "unexpected initialization response."
+            )
+
+            return jsonify({
+                "success": False,
+                "message": (
+                    "Payment initialization is being "
+                    "confirmed. Please do not retry "
+                    "immediately."
+                ),
+                "payment": {
+                    "id": payment.id,
+                    "transaction_reference": reference,
+                    "status": payment.status,
+                },
+            }), 502
+
+    except Exception:
+        app.logger.exception(
+            "Paystack initialization failed or its "
+            "response could not be confirmed. "
+            "Payment reference: %s",
+            reference,
+        )
+
+        return jsonify({
+            "success": False,
+            "message": (
+                "Payment initialization could not "
+                "be confirmed. Please contact support "
+                "with your transaction reference."
+            ),
+            "payment": {
+                "id": payment.id,
+                "transaction_reference": reference,
+                "status": payment.status,
+            },
+        }), 502
+
+    # STEP 3: Return the existing response structure.
     return jsonify({
         "success": True,
         "message": (
@@ -1116,17 +1464,12 @@ def payment_initialize():
             "status": payment.status,
         },
         "paystack": {
-            "authorization_url": paystack_data.get(
-                "authorization_url"
-            ),
-            "access_code": paystack_data.get(
-                "access_code"
-            ),
-            "reference": paystack_data.get(
-                "reference"
-            ),
+            "authorization_url": authorization_url,
+            "access_code": access_code,
+            "reference": paystack_reference,
         },
     }), 200
+
 
 
 # ============================================================
@@ -1249,25 +1592,103 @@ def payment_verify():
             "error": "Payment reference does not match."
         }), 400
 
+    paystack_currency = str(
+        paystack_data.get("currency", "")
+    ).strip().upper()
+
+    expected_currency = str(
+        payment.currency or ""
+    ).strip().upper()
+
+    if (
+        expected_currency != "NGN"
+        or paystack_currency != expected_currency
+    ):
+        return jsonify({
+            "success": False,
+            "error": "Payment currency does not match."
+        }), 400
+
     if paid_amount_kobo != expected_amount_kobo:
         return jsonify({
             "success": False,
             "error": "Payment amount does not match."
         }), 400
 
+        # Independently verify the transaction with Paystack.
+    try:
+        verified_data = verify_transaction(reference)
+
+        if not isinstance(verified_data, dict):
+            return jsonify({
+                "success": False,
+                "error": "Unable to verify Paystack transaction."
+            }), 502
+
+        verified_reference = str(
+            verified_data.get("reference", "")
+        ).strip()
+
+        verified_status = str(
+            verified_data.get("status", "")
+        ).strip().lower()
+
+        verified_currency = str(
+            verified_data.get("currency", "")
+        ).strip().upper()
+
+        verified_amount = int(
+            verified_data.get("amount", 0)
+        )
+
+    except Exception:
+        app.logger.exception(
+            "Paystack transaction verification failed."
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Paystack verification is temporarily unavailable."
+        }), 502
+
+    if verified_reference != reference:
+        return jsonify({
+            "success": False,
+            "error": "Verified transaction reference does not match."
+        }), 400
+
+    if verified_status != "success":
+        return jsonify({
+            "success": False,
+            "error": "Paystack has not confirmed successful payment."
+        }), 400
+
+    if verified_currency != expected_currency:
+        return jsonify({
+            "success": False,
+            "error": "Verified transaction currency does not match."
+        }), 400
+
+    if verified_amount != expected_amount_kobo:
+        return jsonify({
+            "success": False,
+            "error": "Verified transaction amount does not match."
+        }), 400
+
     if paystack_status != "success":
 
-        # Keep payments that are still pending as pending so
-        # they can be verified again after Paystack completes them.
+        # Keep payments that are still pending as pending.
         if paystack_status in {
             "pending",
             "ongoing",
             "processing",
         }:
             payment.status = "pending"
+
         else:
-            # Paystack has returned a terminal non-success status.
-            payment.status = paystack_status or "failed"
+            payment.status = (
+                paystack_status or "failed"
+            )
 
         db.session.commit()
 
@@ -1279,6 +1700,10 @@ def payment_verify():
             ),
             "payment": payment.to_dict(),
         }), 400
+
+    # --------------------------------------------------------
+    # ACTIVATE SUBSCRIPTION AFTER SUCCESSFUL VERIFICATION
+    # --------------------------------------------------------
 
     try:
 
@@ -1389,11 +1814,44 @@ def paystack_webhook():
             "error": "Payment record not found."
         }), 404
 
+    if payment.payment_gateway != "paystack":
+        return jsonify({
+            "success": False,
+            "error": "Invalid payment gateway."
+        }), 400
+
     if payment.status == "successful":
         return jsonify({
             "success": True,
             "message": "Payment already processed."
         }), 200
+
+    webhook_status = str(
+        event_data.get("status", "")
+    ).strip().lower()
+
+    if webhook_status != "success":
+        return jsonify({
+            "success": False,
+            "error": "Paystack transaction was not successful."
+        }), 400
+
+    webhook_currency = str(
+        event_data.get("currency", "")
+    ).strip().upper()
+
+    expected_currency = str(
+        payment.currency or ""
+    ).strip().upper()
+
+    if (
+        expected_currency != "NGN"
+        or webhook_currency != expected_currency
+    ):
+        return jsonify({
+            "success": False,
+            "error": "Payment currency does not match."
+        }), 400
 
     try:
         paid_amount_kobo = int(
@@ -1407,11 +1865,73 @@ def paystack_webhook():
 
     expected_amount_kobo = int(payment.amount) * 100
 
+
     if paid_amount_kobo != expected_amount_kobo:
         return jsonify({
             "success": False,
             "error": "Payment amount does not match."
         }), 400
+
+    # Independently verify the transaction with Paystack.
+    try:
+        verified_data = verify_transaction(reference)
+
+        if not isinstance(verified_data, dict):
+            return jsonify({
+                "success": False,
+                "error": "Unable to verify Paystack transaction."
+            }), 502
+
+        verified_reference = str(
+            verified_data.get("reference", "")
+        ).strip()
+
+        verified_status = str(
+            verified_data.get("status", "")
+        ).strip().lower()
+
+        verified_currency = str(
+            verified_data.get("currency", "")
+        ).strip().upper()
+
+        verified_amount = int(
+            verified_data.get("amount", 0)
+        )
+
+    except Exception:
+        app.logger.exception(
+            "Paystack transaction verification failed."
+        )
+
+        return jsonify({
+            "success": False,
+            "error": "Paystack verification is temporarily unavailable."
+        }), 502
+
+    if verified_reference != reference:
+        return jsonify({
+            "success": False,
+            "error": "Verified transaction reference does not match."
+        }), 400
+
+    if verified_status != "success":
+        return jsonify({
+            "success": False,
+            "error": "Paystack has not confirmed successful payment."
+        }), 400
+
+    if verified_currency != expected_currency:
+        return jsonify({
+            "success": False,
+            "error": "Verified transaction currency does not match."
+        }), 400
+
+    if verified_amount != expected_amount_kobo:
+        return jsonify({
+            "success": False,
+            "error": "Verified transaction amount does not match."
+        }), 400
+
 
     try:
         activated_payment, subscription = (
@@ -1841,6 +2361,7 @@ def forgot_password():
 
     return jsonify(generic_response), 200
 
+
 # ============================================================
 # ACCOUNT - DELETE
 # ============================================================
@@ -1851,78 +2372,83 @@ def forgot_password():
 )
 def delete_account():
 
-    # --------------------------------------------------------
-    # AUTHENTICATE USER
-    # --------------------------------------------------------
-
+    # Authenticate user.
     user, auth_error = get_authenticated_user()
 
     if auth_error:
         return auth_error
 
     try:
-
         user_id = user.id
 
-        # ----------------------------------------------------
-        # DELETE USER SUBSCRIPTIONS
-        # ----------------------------------------------------
-
-        Subscription.query.filter_by(
+        # Delete saved transcripts, translations and reports.
+        TranscriptionHistory.query.filter_by(
             user_id=user_id
         ).delete(
             synchronize_session=False
         )
 
-        # ----------------------------------------------------
-        # DELETE USER CREDIT ACCOUNT
-        # ----------------------------------------------------
-
+        # Remove the user's available credit balance.
         UserCredit.query.filter_by(
             user_id=user_id
         ).delete(
             synchronize_session=False
         )
 
-        # ----------------------------------------------------
-        # DELETE USER CREDIT TRANSACTIONS
-        # ----------------------------------------------------
+        # Preserve these records:
+        # - Payment
+        # - Subscription
+        # - CreditTransaction
+        #
+        # Their foreign keys reference the existing user ID.
+        # Therefore, do not physically delete the User row.
 
-        CreditTransaction.query.filter_by(
-            user_id=user_id
-        ).delete(
-            synchronize_session=False
+        # Anonymise the account's email.
+        user.email = f"deleted-{user_id}@deleted.invalid"
+
+        # Invalidate the password and prevent further login.
+        user.set_password(secrets.token_urlsafe(48))
+        user.is_blocked = True
+        user.blocked_at = datetime.now(timezone.utc)
+        user.blocked_reason = "Account deleted by user."
+
+        # Remove password-reset credentials.
+        user.password_reset_token_hash = None
+        user.password_reset_expires_at = None
+        user.password_reset_used = False
+
+        # Remove any administrator role.
+        user.role = "user"
+
+        # Record the account deletion in the same transaction.
+        record_admin_action(
+            admin=None,
+            action="user_account_deleted",
+            affected_user_id=user_id,
+            reason="User requested account deletion"
         )
-
-        # ----------------------------------------------------
-        # DELETE USER ACCOUNT
-        # ----------------------------------------------------
-
-        db.session.delete(user)
 
         db.session.commit()
 
         return jsonify({
             "success": True,
             "message": (
-                "Your NabTranscriber account and "
-                "associated account data have been deleted."
+                "Your account has been deactivated and "
+                "personal transcription data has been deleted."
             )
         }), 200
 
-    except Exception as e:
-
+    except Exception:
         db.session.rollback()
 
-        print(
-            "Account deletion failed:",
-            e
+        app.logger.exception(
+            "Account deletion failed"
         )
 
         return jsonify({
             "success": False,
             "error": (
-                "We could not delete your account. "
+                "We could not process your account deletion. "
                 "Please try again later."
             )
         }), 500
